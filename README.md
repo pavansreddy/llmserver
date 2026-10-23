@@ -45,7 +45,7 @@ llmserver is one bash script. It installs all that it needs into one folder, `~/
 1. Download the script and make it executable:
 
    ```bash
-   curl -fsSLO https://github.com/pavansreddy/llmserver/blob/main/llmserver
+   download  https://github.com/pavansreddy/llmserver/blob/main/llmserver
    chmod +x llmserver
    mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
    ```
