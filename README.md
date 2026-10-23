@@ -1,15 +1,210 @@
-# llmserver 2.7.1  Operator manual
+# llmserver
 
+**One script for Linux that operates local large language models (LLMs) with llama.cpp, vLLM or Ollama. Each model gets its own OpenAI-compatible API. A web chat with document search and private web search is included.**
+
+Version 2.7.1. This document uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
+
+llmserver is one bash script. It installs all that it needs into one folder, `~/.llmserver`. It does not use Docker or sudo, and it does not install system packages. Each download has a fixed version and a fixed SHA-256 checksum.
+
+---
+
+## Features
+
+| Feature | What llmserver does | Section |
+|---|---|---|
+| Three engines | Operates GGUF models on llama.cpp, Hugging Face models on vLLM, and Ollama models. Each model gets its own port and `/v1` endpoint | [1.1](#11-what-llmserver-is), [3.4](#34-start-a-model) |
+| Memory plan | Calculates the memory that a model needs at your context size. Tells you if the model will operate well, operate slowly or not operate | [3.1](#31-examine-the-computer-and-the-models), [6.6](#66-verdicts) |
+| GPU placement | Finds the best GPU next to the models that operate already. Shows which models must stop when the GPUs are full. Starts them again if a start fails | [3.5](#35-start-more-than-one-model), [3.8](#38-decide-what-to-do-when-the-gpus-are-full) |
+| Model security checks | Reads the Hugging Face scan results before the download. Downloads only the files that the engine needs, at a fixed commit. Does a check of the format and the SHA-256 of each file. Refuses pickle files and remote code unless you permit them | [4](#4-control-the-security-of-models-and-skills) |
+| Two security levels | `standard` asks about warnings. `strict` needs your approval for each model | [4.2](#42-select-the-security-level) |
+| Sandbox | Operates the engines, Open WebUI and SearXNG in bubblewrap: a read-only system, an empty home folder, no access to your API key or settings | [4.17](#417-isolate-the-engines) |
+| Self-contained installation | Installs uv, a private Python and the engines into `~/.llmserver`. Does not change your operating system | [1.3](#13-self-contained-installation) |
+| Your own engines and files | Uses an engine that you installed, a release file that you downloaded, or a GGUF file on your computer | [3.18](#318-use-an-engine-that-you-installed), [3.19](#319-install-an-engine-from-a-file-that-you-downloaded), [3.29](#329-use-a-gguf-file-on-your-computer) |
+| Terminal chat | `llmserver chat` streams the answers, shows the speed, hides or shows the thinking, and sets the reasoning level | [3.28](#328-chat-with-a-model) |
+| Speed measurement | `llmserver bench` measures TTFT, prefill, decode, TPOT, ITL percentiles and E2E latency, with thinking and answer tokens separate | [3.13](#313-measure-the-speed) |
+| Speculative decoding | Uses a draft model (llama.cpp, vLLM) or prompt lookup (vLLM) | [3.14](#314-use-speculative-decoding) |
+| Gateway | One OpenAI-compatible address for all running models. Selects the model by its name | [3.33](#333-use-one-address-for-all-models-the-gateway) |
+| Web chat (Open WebUI) | Installs and operates Open WebUI for the people on your network: accounts, an administrator, approval of new accounts, all running models | [3.30](#330-give-people-on-the-network-a-web-chat-open-webui) |
+| Hybrid document search | Keyword search (BM25) and meaning search (vectors), then a reranker. A fast reranker on the CPU, or bge-reranker-v2-m3 on llama.cpp for many languages | [3.31](#331-find-answers-in-documents-hybrid-search) |
+| Private web search | A private SearXNG on `127.0.0.1` gives web search to the chat, without cookies | [3.32](#332-search-the-web-from-the-chat-searxng) |
+| Network access | Puts models on the network with an API key. Makes new keys | [3.16](#316-make-the-models-available-on-the-network) |
+| Automatic start | Starts models and Open WebUI when you log in (systemd user services) | [3.22](#322-start-models-automatically-after-login) |
+| Settings without an editor | `config`, `model`, `key` and `autostart` commands do a check of each change before they save it | [3.3](#33-add-remove-and-change-the-models-in-the-menu), [3.12](#312-change-the-settings) |
+| Updates and rollback | Installs the specified versions or the newest verified versions. Goes back to the previous build | [3.20](#320-update-the-engines), [7.4](#74-go-back-to-the-previous-engine-build) |
+| Computers without a network | Exports models and engines into a signed bundle. Imports the bundle on a computer without a network | [4.12](#412-move-models-to-a-computer-without-a-network), [4.13](#413-install-the-engines-without-a-network), [4.14](#414-sign-and-verify-bundles) |
+| Software bill of materials | Writes a CycloneDX SBOM of all that is installed | [4.15](#415-make-a-software-bill-of-materials) |
+| Behaviour tests | `llmserver eval` tests a model with built-in probes or with garak | [4.18](#418-test-the-behaviour-of-a-model) |
+| Skills for AI agents | Installs checked skills for Claude Code and other agents. Includes the Hugging Face CLI at a fixed version | [3.24](#324-use-the-hugging-face-cli), [3.25](#325-install-skills-for-ai-agents) |
+| Programs and scripts | `--json` output for the inspection commands | [3.23](#323-use-llmserver-from-other-programs) |
+| Health check and repair | `llmserver doctor` finds problems. `--fix` repairs them | [5.1](#51-do-a-check-of-llmserver) |
+
+---
+
+## Quick start
+
+1. Download the script and make it executable:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/OWNER/llmserver/main/llmserver
+   chmod +x llmserver
+   mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
+   ```
+
+2. Do the setup. The setup selects the engines, the network and the context, and installs what is necessary:
+
+   ```bash
+   llmserver setup
+   ```
+
+3. Start a model:
+
+   ```bash
+   llmserver llama:unsloth/Qwen3-8B-GGUF:Q4_K_M
+   ```
+
+   Result: llmserver does the security checks, downloads the model, starts it and shows its address.
+
+4. Chat with the model in the terminal:
+
+   ```bash
+   llmserver chat
+   ```
+
+5. Give the people on your network a web chat:
+
+   ```bash
+   llmserver webui
+   ```
+
+For each step in detail, see [2. Get started](#2-get-started).
+
+---
+
+## Find a task
+
+| To do this | Read |
+|---|---|
+| Make sure that the computer is applicable | [2.1](#21-make-sure-that-the-computer-is-applicable) |
+| Install llmserver and do the setup | [2.2](#22-install-the-script), [2.3](#23-do-the-setup) |
+| Start, stop and chat with a model | [2.4](#24-start-your-first-model), [2.7](#27-stop-the-model), [3.28](#328-chat-with-a-model) |
+| Connect a program that uses the OpenAI API | [2.5](#25-connect-a-client), [3.7](#37-connect-clients-to-a-model), [3.33](#333-use-one-address-for-all-models-the-gateway) |
+| Know if a model fits on the GPUs | [3.1](#31-examine-the-computer-and-the-models), [3.6](#36-monitor-the-gpus-and-the-models) |
+| Operate more than one model | [3.5](#35-start-more-than-one-model), [3.8](#38-decide-what-to-do-when-the-gpus-are-full), [3.9](#39-protect-a-model-from-a-stop) |
+| Give a web chat to the people on the network | [3.30](#330-give-people-on-the-network-a-web-chat-open-webui) |
+| Ask questions about documents | [3.31](#331-find-answers-in-documents-hybrid-search) |
+| Search the web from the chat | [3.32](#332-search-the-web-from-the-chat-searxng) |
+| Answer a security warning or approve a model | [4.4](#44-answer-a-security-warning), [4.5](#45-approve-a-model) |
+| Install without a network | [3.21](#321-install-through-a-firewall-or-a-mirror), [4.12](#412-move-models-to-a-computer-without-a-network), [4.13](#413-install-the-engines-without-a-network) |
+| Find the cause of a problem | [5.1](#51-do-a-check-of-llmserver), [5.3](#53-problems-and-corrective-actions) |
+| Find a command, an option or a setting | [6.1](#61-commands), [6.2](#62-options), [6.4](#64-settings) |
+| Remove llmserver | [7.11](#711-uninstall-llmserver) |
+
+---
 
 ## Contents
 
-1. [Introduction](#1-introduction)
-2. [Get started](#2-get-started)
-3. [Operate llmserver](#3-operate-llmserver)
-4. [Control the security of models and skills](#4-control-the-security-of-models-and-skills)
-5. [Monitor and correct problems](#5-monitor-and-correct-problems)
-6. [Reference data](#6-reference-data)
-7. [Undo, restore and remove](#7-undo-restore-and-remove)
+- [1. Introduction](#1-introduction)
+  - [1.1 What llmserver is](#11-what-llmserver-is)
+  - [1.2 What llmserver does](#12-what-llmserver-does)
+  - [1.3 Self-contained installation](#13-self-contained-installation)
+  - [1.4 Safety of downloads](#14-safety-of-downloads)
+  - [1.5 Notices in this manual](#15-notices-in-this-manual)
+  - [1.6 Test status](#16-test-status)
+- [2. Get started](#2-get-started)
+  - [2.1 Make sure that the computer is applicable](#21-make-sure-that-the-computer-is-applicable)
+  - [2.2 Install the script](#22-install-the-script)
+  - [2.3 Do the setup](#23-do-the-setup)
+  - [2.4 Start your first model](#24-start-your-first-model)
+  - [2.5 Connect a client](#25-connect-a-client)
+  - [2.6 Chat with the model](#26-chat-with-the-model)
+  - [2.7 Stop the model](#27-stop-the-model)
+- [3. Operate llmserver](#3-operate-llmserver)
+  - [3.1 Examine the computer and the models](#31-examine-the-computer-and-the-models)
+  - [3.2 Install the engines](#32-install-the-engines)
+  - [3.3 Add, remove and change the models in the menu](#33-add-remove-and-change-the-models-in-the-menu)
+  - [3.4 Start a model](#34-start-a-model)
+  - [3.5 Start more than one model](#35-start-more-than-one-model)
+  - [3.6 Monitor the GPUs and the models](#36-monitor-the-gpus-and-the-models)
+  - [3.7 Connect clients to a model](#37-connect-clients-to-a-model)
+  - [3.8 Decide what to do when the GPUs are full](#38-decide-what-to-do-when-the-gpus-are-full)
+  - [3.9 Protect a model from a stop](#39-protect-a-model-from-a-stop)
+  - [3.10 Operate one model at a time](#310-operate-one-model-at-a-time)
+  - [3.11 Select the GPUs for llmserver](#311-select-the-gpus-for-llmserver)
+  - [3.12 Change the settings](#312-change-the-settings)
+  - [3.13 Measure the speed](#313-measure-the-speed)
+  - [3.14 Use speculative decoding](#314-use-speculative-decoding)
+  - [3.15 Download a model before you need it](#315-download-a-model-before-you-need-it)
+  - [3.16 Make the models available on the network](#316-make-the-models-available-on-the-network)
+  - [3.17 Operate llmserver in a container](#317-operate-llmserver-in-a-container)
+  - [3.18 Use an engine that you installed](#318-use-an-engine-that-you-installed)
+  - [3.19 Install an engine from a file that you downloaded](#319-install-an-engine-from-a-file-that-you-downloaded)
+  - [3.20 Update the engines](#320-update-the-engines)
+  - [3.21 Install through a firewall or a mirror](#321-install-through-a-firewall-or-a-mirror)
+  - [3.22 Start models automatically after login](#322-start-models-automatically-after-login)
+  - [3.23 Use llmserver from other programs](#323-use-llmserver-from-other-programs)
+  - [3.24 Use the Hugging Face CLI](#324-use-the-hugging-face-cli)
+  - [3.25 Install skills for AI agents](#325-install-skills-for-ai-agents)
+  - [3.26 Update the skills](#326-update-the-skills)
+  - [3.27 Move the llmserver home](#327-move-the-llmserver-home)
+  - [3.28 Chat with a model](#328-chat-with-a-model)
+  - [3.29 Use a GGUF file on your computer](#329-use-a-gguf-file-on-your-computer)
+  - [3.30 Give people on the network a web chat (Open WebUI)](#330-give-people-on-the-network-a-web-chat-open-webui)
+  - [3.31 Find answers in documents (hybrid search)](#331-find-answers-in-documents-hybrid-search)
+  - [3.32 Search the web from the chat (SearXNG)](#332-search-the-web-from-the-chat-searxng)
+  - [3.33 Use one address for all models (the gateway)](#333-use-one-address-for-all-models-the-gateway)
+  - [3.34 Upgrade from a version before 2.1](#334-upgrade-from-a-version-before-21)
+- [4. Control the security of models and skills](#4-control-the-security-of-models-and-skills)
+  - [4.1 How the security checks work](#41-how-the-security-checks-work)
+  - [4.2 Select the security level](#42-select-the-security-level)
+  - [4.3 Do a check of a model before you download it](#43-do-a-check-of-a-model-before-you-download-it)
+  - [4.4 Answer a security warning](#44-answer-a-security-warning)
+  - [4.5 Approve a model](#45-approve-a-model)
+  - [4.6 Examine a check record](#46-examine-a-check-record)
+  - [4.7 Update a model to a new commit](#47-update-a-model-to-a-new-commit)
+  - [4.8 Lock a menu entry to a commit](#48-lock-a-menu-entry-to-a-commit)
+  - [4.9 Make the strict level necessary for all users](#49-make-the-strict-level-necessary-for-all-users)
+  - [4.10 Use models that you downloaded before version 1.7](#410-use-models-that-you-downloaded-before-version-17)
+  - [4.11 Security checks for skills](#411-security-checks-for-skills)
+  - [4.12 Move models to a computer without a network](#412-move-models-to-a-computer-without-a-network)
+  - [4.13 Install the engines without a network](#413-install-the-engines-without-a-network)
+  - [4.14 Sign and verify bundles](#414-sign-and-verify-bundles)
+  - [4.15 Make a software bill of materials](#415-make-a-software-bill-of-materials)
+  - [4.16 Use local scanners](#416-use-local-scanners)
+  - [4.17 Isolate the engines](#417-isolate-the-engines)
+  - [4.18 Test the behaviour of a model](#418-test-the-behaviour-of-a-model)
+  - [4.19 Limits of the security checks](#419-limits-of-the-security-checks)
+- [5. Monitor and correct problems](#5-monitor-and-correct-problems)
+  - [5.1 Do a check of llmserver](#51-do-a-check-of-llmserver)
+  - [5.2 Recover after a crash of llmserver](#52-recover-after-a-crash-of-llmserver)
+  - [5.3 Problems and corrective actions](#53-problems-and-corrective-actions)
+- [6. Reference data](#6-reference-data)
+  - [6.1 Commands](#61-commands)
+  - [6.2 Options](#62-options)
+  - [6.3 Model names](#63-model-names)
+  - [6.4 Settings](#64-settings)
+  - [6.5 Files and folders](#65-files-and-folders)
+  - [6.6 Verdicts](#66-verdicts)
+  - [6.7 VRAM guard](#67-vram-guard)
+  - [6.8 Engine builds](#68-engine-builds)
+  - [6.9 Exit status](#69-exit-status)
+  - [6.10 Limits](#610-limits)
+  - [6.11 Security rules](#611-security-rules)
+  - [6.12 Check record](#612-check-record)
+  - [6.13 Bundle format](#613-bundle-format)
+- [7. Undo, restore and remove](#7-undo-restore-and-remove)
+  - [7.1 Stop models](#71-stop-models)
+  - [7.2 Remove a pin](#72-remove-a-pin)
+  - [7.3 Undo a start that failed](#73-undo-a-start-that-failed)
+  - [7.4 Go back to the previous engine build](#74-go-back-to-the-previous-engine-build)
+  - [7.5 Go back to the specified versions](#75-go-back-to-the-specified-versions)
+  - [7.6 Repair an engine](#76-repair-an-engine)
+  - [7.7 Reset the settings](#77-reset-the-settings)
+  - [7.8 Withdraw an approval](#78-withdraw-an-approval)
+  - [7.9 Delete the check records](#79-delete-the-check-records)
+  - [7.10 Remove skills](#710-remove-skills)
+  - [7.11 Uninstall llmserver](#711-uninstall-llmserver)
+- [Sources](#sources)
+- [License](#license)
 
 ---
 
@@ -117,8 +312,8 @@ Make sure that the computer agrees with these requirements:
 | Recommended programs | `ss` or `lsof`, `flock`, `setsid`, `timeout`. `numactl` or `taskset` for NUMA computers. `pgrep` for `doctor` |
 | C library | glibc 2.35 or newer. glibc 2.39 or newer for the CUDA builds of llama.cpp and for vLLM on AMD |
 | GPU driver | NVIDIA: the NVIDIA driver with `nvidia-smi`. AMD: the `amdgpu` kernel driver. vLLM and Ollama on AMD also need `amdkfd` |
-| Disk | About 200 MB for the runtime, 25 to 800 MB for llama.cpp, 1.5 to 2.6 GB for Ollama, 10.5 to 14 GB for vLLM (NVIDIA includes 1.5 GB of FlashInfer kernels). Add the size of each model plus 10% |
-| Network | HTTPS access to `github.com`, `pypi.org`, `files.pythonhosted.org`, `download.pytorch.org`, `wheels.vllm.ai`, `huggingface.co` and `registry.ollama.ai`. You can use mirrors (see [3.21](#321-install-through-a-firewall-or-a-mirror)) |
+| Disk | About 200 MB for the runtime, 25 to 800 MB for llama.cpp, 1.5 to 2.6 GB for Ollama, 10.5 to 14 GB for vLLM (NVIDIA includes 1.5 GB of FlashInfer kernels). Optional: 2.5 GB for Open WebUI with its document models, 150 MB for SearXNG, 0.6 GB for the best reranker. Add the size of each model plus 10% |
+| Network | HTTPS access to `github.com`, `pypi.org`, `files.pythonhosted.org`, `download.pytorch.org`, `wheels.vllm.ai`, `huggingface.co` and `registry.ollama.ai`. Web search also needs access to the public search engines. You can use mirrors (see [3.21](#321-install-through-a-firewall-or-a-mirror)) |
 
 > **NOTE:** You do not need Python on the computer. llmserver installs its own Python.
 
@@ -142,7 +337,7 @@ Make sure that the computer agrees with these requirements:
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.6.0`.
+   Result: The command shows `llmserver 2.7.1`.
 
 ### 2.3 Do the setup
 
@@ -2319,3 +2514,17 @@ The engine versions and checksums came from the releases of each project on 2026
 - [vLLM on PyPI](https://pypi.org/project/vllm/) and [vLLM GPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/)
 - [vLLM quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart/) and [Ollama hardware support](https://docs.ollama.com/gpu)
 - [Ultra-Fast LLM Inference on AMD Instinct MI355X (AMD ROCm Blogs)](https://rocm.blogs.amd.com/software-tools-optimization/megakernel-intro/README.html) (the origin of `bench`, speed estimates, speculative decoding, NUMA placement and tuning rules)
+
+---
+
+## License
+
+llmserver: add your license here (for example MIT or Apache-2.0).
+
+llmserver does not include the programs that it installs. It downloads them on your computer, and each one keeps its own license:
+
+- Open WebUI: the Open WebUI license (BSD-3-Clause with a branding clause). You must keep its "Open WebUI" branding if more than 50 people use it in 30 days, unless you have an enterprise license.
+- SearXNG: AGPL-3.0. llmserver installs it from its fixed source with its license. It adds only a version file.
+- llama.cpp (MIT), vLLM (Apache-2.0), Ollama (MIT), uv (Apache-2.0 or MIT).
+- Each model has its own license. `llmserver trust show MODEL` shows it.
+
