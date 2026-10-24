@@ -2519,7 +2519,7 @@ The engine versions and checksums came from the releases of each project on 2026
 
 ## License
 
-llmserver: add your license here (for example MIT or Apache-2.0).
+llmserver: Apache-2.0
 
 llmserver does not include the programs that it installs. It downloads them on your computer, and each one keeps its own license:
 
