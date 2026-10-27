@@ -1,210 +1,18 @@
-# llmserver
+# llmserver 2.7.3 — Operator manual
 
-**One script for Linux that operates local large language models (LLMs) with llama.cpp, vLLM or Ollama. Each model gets its own OpenAI-compatible API. A web chat with document search and private web search is included.**
-
-Version 2.7.1. This document uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
-
-llmserver is one bash script. It installs all that it needs into one folder, `~/.llmserver`. It does not use Docker or sudo, and it does not install system packages. Each download has a fixed version and a fixed SHA-256 checksum.
-
----
-
-## Features
-
-| Feature | What llmserver does | Section |
-|---|---|---|
-| Three engines | Operates GGUF models on llama.cpp, Hugging Face models on vLLM, and Ollama models. Each model gets its own port and `/v1` endpoint | [1.1](#11-what-llmserver-is), [3.4](#34-start-a-model) |
-| Memory plan | Calculates the memory that a model needs at your context size. Tells you if the model will operate well, operate slowly or not operate | [3.1](#31-examine-the-computer-and-the-models), [6.6](#66-verdicts) |
-| GPU placement | Finds the best GPU next to the models that operate already. Shows which models must stop when the GPUs are full. Starts them again if a start fails | [3.5](#35-start-more-than-one-model), [3.8](#38-decide-what-to-do-when-the-gpus-are-full) |
-| Model security checks | Reads the Hugging Face scan results before the download. Downloads only the files that the engine needs, at a fixed commit. Does a check of the format and the SHA-256 of each file. Refuses pickle files and remote code unless you permit them | [4](#4-control-the-security-of-models-and-skills) |
-| Two security levels | `standard` asks about warnings. `strict` needs your approval for each model | [4.2](#42-select-the-security-level) |
-| Sandbox | Operates the engines, Open WebUI and SearXNG in bubblewrap: a read-only system, an empty home folder, no access to your API key or settings | [4.17](#417-isolate-the-engines) |
-| Self-contained installation | Installs uv, a private Python and the engines into `~/.llmserver`. Does not change your operating system | [1.3](#13-self-contained-installation) |
-| Your own engines and files | Uses an engine that you installed, a release file that you downloaded, or a GGUF file on your computer | [3.18](#318-use-an-engine-that-you-installed), [3.19](#319-install-an-engine-from-a-file-that-you-downloaded), [3.29](#329-use-a-gguf-file-on-your-computer) |
-| Terminal chat | `llmserver chat` streams the answers, shows the speed, hides or shows the thinking, and sets the reasoning level | [3.28](#328-chat-with-a-model) |
-| Speed measurement | `llmserver bench` measures TTFT, prefill, decode, TPOT, ITL percentiles and E2E latency, with thinking and answer tokens separate | [3.13](#313-measure-the-speed) |
-| Speculative decoding | Uses a draft model (llama.cpp, vLLM) or prompt lookup (vLLM) | [3.14](#314-use-speculative-decoding) |
-| Gateway | One OpenAI-compatible address for all running models. Selects the model by its name | [3.33](#333-use-one-address-for-all-models-the-gateway) |
-| Web chat (Open WebUI) | Installs and operates Open WebUI for the people on your network: accounts, an administrator, approval of new accounts, all running models | [3.30](#330-give-people-on-the-network-a-web-chat-open-webui) |
-| Hybrid document search | Keyword search (BM25) and meaning search (vectors), then a reranker. A fast reranker on the CPU, or bge-reranker-v2-m3 on llama.cpp for many languages | [3.31](#331-find-answers-in-documents-hybrid-search) |
-| Private web search | A private SearXNG on `127.0.0.1` gives web search to the chat, without cookies | [3.32](#332-search-the-web-from-the-chat-searxng) |
-| Network access | Puts models on the network with an API key. Makes new keys | [3.16](#316-make-the-models-available-on-the-network) |
-| Automatic start | Starts models and Open WebUI when you log in (systemd user services) | [3.22](#322-start-models-automatically-after-login) |
-| Settings without an editor | `config`, `model`, `key` and `autostart` commands do a check of each change before they save it | [3.3](#33-add-remove-and-change-the-models-in-the-menu), [3.12](#312-change-the-settings) |
-| Updates and rollback | Installs the specified versions or the newest verified versions. Goes back to the previous build | [3.20](#320-update-the-engines), [7.4](#74-go-back-to-the-previous-engine-build) |
-| Computers without a network | Exports models and engines into a signed bundle. Imports the bundle on a computer without a network | [4.12](#412-move-models-to-a-computer-without-a-network), [4.13](#413-install-the-engines-without-a-network), [4.14](#414-sign-and-verify-bundles) |
-| Software bill of materials | Writes a CycloneDX SBOM of all that is installed | [4.15](#415-make-a-software-bill-of-materials) |
-| Behaviour tests | `llmserver eval` tests a model with built-in probes or with garak | [4.18](#418-test-the-behaviour-of-a-model) |
-| Skills for AI agents | Installs checked skills for Claude Code and other agents. Includes the Hugging Face CLI at a fixed version | [3.24](#324-use-the-hugging-face-cli), [3.25](#325-install-skills-for-ai-agents) |
-| Programs and scripts | `--json` output for the inspection commands | [3.23](#323-use-llmserver-from-other-programs) |
-| Health check and repair | `llmserver doctor` finds problems. `--fix` repairs them | [5.1](#51-do-a-check-of-llmserver) |
-
----
-
-## Quick start
-
-1. Download the script and make it executable:
-
-   ```bash
-   download  https://raw.githubusercontent.com/pavansreddy/llmserver/refs/heads/main/llmserver
-   chmod +x llmserver
-   mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
-   ```
-
-2. Do the setup. The setup selects the engines, the network and the context, and installs what is necessary:
-
-   ```bash
-   llmserver setup
-   ```
-
-3. Start a model:
-
-   ```bash
-   llmserver llama:unsloth/Qwen3-8B-GGUF:Q4_K_M
-   ```
-
-   Result: llmserver does the security checks, downloads the model, starts it and shows its address.
-
-4. Chat with the model in the terminal:
-
-   ```bash
-   llmserver chat
-   ```
-
-5. Give the people on your network a web chat:
-
-   ```bash
-   llmserver webui
-   ```
-
-For each step in detail, see [2. Get started](#2-get-started).
-
----
-
-## Find a task
-
-| To do this | Read |
-|---|---|
-| Make sure that the computer is applicable | [2.1](#21-make-sure-that-the-computer-is-applicable) |
-| Install llmserver and do the setup | [2.2](#22-install-the-script), [2.3](#23-do-the-setup) |
-| Start, stop and chat with a model | [2.4](#24-start-your-first-model), [2.7](#27-stop-the-model), [3.28](#328-chat-with-a-model) |
-| Connect a program that uses the OpenAI API | [2.5](#25-connect-a-client), [3.7](#37-connect-clients-to-a-model), [3.33](#333-use-one-address-for-all-models-the-gateway) |
-| Know if a model fits on the GPUs | [3.1](#31-examine-the-computer-and-the-models), [3.6](#36-monitor-the-gpus-and-the-models) |
-| Operate more than one model | [3.5](#35-start-more-than-one-model), [3.8](#38-decide-what-to-do-when-the-gpus-are-full), [3.9](#39-protect-a-model-from-a-stop) |
-| Give a web chat to the people on the network | [3.30](#330-give-people-on-the-network-a-web-chat-open-webui) |
-| Ask questions about documents | [3.31](#331-find-answers-in-documents-hybrid-search) |
-| Search the web from the chat | [3.32](#332-search-the-web-from-the-chat-searxng) |
-| Answer a security warning or approve a model | [4.4](#44-answer-a-security-warning), [4.5](#45-approve-a-model) |
-| Install without a network | [3.21](#321-install-through-a-firewall-or-a-mirror), [4.12](#412-move-models-to-a-computer-without-a-network), [4.13](#413-install-the-engines-without-a-network) |
-| Find the cause of a problem | [5.1](#51-do-a-check-of-llmserver), [5.3](#53-problems-and-corrective-actions) |
-| Find a command, an option or a setting | [6.1](#61-commands), [6.2](#62-options), [6.4](#64-settings) |
-| Remove llmserver | [7.11](#711-uninstall-llmserver) |
+This manual uses Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
 
 ---
 
 ## Contents
 
-- [1. Introduction](#1-introduction)
-  - [1.1 What llmserver is](#11-what-llmserver-is)
-  - [1.2 What llmserver does](#12-what-llmserver-does)
-  - [1.3 Self-contained installation](#13-self-contained-installation)
-  - [1.4 Safety of downloads](#14-safety-of-downloads)
-  - [1.5 Notices in this manual](#15-notices-in-this-manual)
-  - [1.6 Test status](#16-test-status)
-- [2. Get started](#2-get-started)
-  - [2.1 Make sure that the computer is applicable](#21-make-sure-that-the-computer-is-applicable)
-  - [2.2 Install the script](#22-install-the-script)
-  - [2.3 Do the setup](#23-do-the-setup)
-  - [2.4 Start your first model](#24-start-your-first-model)
-  - [2.5 Connect a client](#25-connect-a-client)
-  - [2.6 Chat with the model](#26-chat-with-the-model)
-  - [2.7 Stop the model](#27-stop-the-model)
-- [3. Operate llmserver](#3-operate-llmserver)
-  - [3.1 Examine the computer and the models](#31-examine-the-computer-and-the-models)
-  - [3.2 Install the engines](#32-install-the-engines)
-  - [3.3 Add, remove and change the models in the menu](#33-add-remove-and-change-the-models-in-the-menu)
-  - [3.4 Start a model](#34-start-a-model)
-  - [3.5 Start more than one model](#35-start-more-than-one-model)
-  - [3.6 Monitor the GPUs and the models](#36-monitor-the-gpus-and-the-models)
-  - [3.7 Connect clients to a model](#37-connect-clients-to-a-model)
-  - [3.8 Decide what to do when the GPUs are full](#38-decide-what-to-do-when-the-gpus-are-full)
-  - [3.9 Protect a model from a stop](#39-protect-a-model-from-a-stop)
-  - [3.10 Operate one model at a time](#310-operate-one-model-at-a-time)
-  - [3.11 Select the GPUs for llmserver](#311-select-the-gpus-for-llmserver)
-  - [3.12 Change the settings](#312-change-the-settings)
-  - [3.13 Measure the speed](#313-measure-the-speed)
-  - [3.14 Use speculative decoding](#314-use-speculative-decoding)
-  - [3.15 Download a model before you need it](#315-download-a-model-before-you-need-it)
-  - [3.16 Make the models available on the network](#316-make-the-models-available-on-the-network)
-  - [3.17 Operate llmserver in a container](#317-operate-llmserver-in-a-container)
-  - [3.18 Use an engine that you installed](#318-use-an-engine-that-you-installed)
-  - [3.19 Install an engine from a file that you downloaded](#319-install-an-engine-from-a-file-that-you-downloaded)
-  - [3.20 Update the engines](#320-update-the-engines)
-  - [3.21 Install through a firewall or a mirror](#321-install-through-a-firewall-or-a-mirror)
-  - [3.22 Start models automatically after login](#322-start-models-automatically-after-login)
-  - [3.23 Use llmserver from other programs](#323-use-llmserver-from-other-programs)
-  - [3.24 Use the Hugging Face CLI](#324-use-the-hugging-face-cli)
-  - [3.25 Install skills for AI agents](#325-install-skills-for-ai-agents)
-  - [3.26 Update the skills](#326-update-the-skills)
-  - [3.27 Move the llmserver home](#327-move-the-llmserver-home)
-  - [3.28 Chat with a model](#328-chat-with-a-model)
-  - [3.29 Use a GGUF file on your computer](#329-use-a-gguf-file-on-your-computer)
-  - [3.30 Give people on the network a web chat (Open WebUI)](#330-give-people-on-the-network-a-web-chat-open-webui)
-  - [3.31 Find answers in documents (hybrid search)](#331-find-answers-in-documents-hybrid-search)
-  - [3.32 Search the web from the chat (SearXNG)](#332-search-the-web-from-the-chat-searxng)
-  - [3.33 Use one address for all models (the gateway)](#333-use-one-address-for-all-models-the-gateway)
-  - [3.34 Upgrade from a version before 2.1](#334-upgrade-from-a-version-before-21)
-- [4. Control the security of models and skills](#4-control-the-security-of-models-and-skills)
-  - [4.1 How the security checks work](#41-how-the-security-checks-work)
-  - [4.2 Select the security level](#42-select-the-security-level)
-  - [4.3 Do a check of a model before you download it](#43-do-a-check-of-a-model-before-you-download-it)
-  - [4.4 Answer a security warning](#44-answer-a-security-warning)
-  - [4.5 Approve a model](#45-approve-a-model)
-  - [4.6 Examine a check record](#46-examine-a-check-record)
-  - [4.7 Update a model to a new commit](#47-update-a-model-to-a-new-commit)
-  - [4.8 Lock a menu entry to a commit](#48-lock-a-menu-entry-to-a-commit)
-  - [4.9 Make the strict level necessary for all users](#49-make-the-strict-level-necessary-for-all-users)
-  - [4.10 Use models that you downloaded before version 1.7](#410-use-models-that-you-downloaded-before-version-17)
-  - [4.11 Security checks for skills](#411-security-checks-for-skills)
-  - [4.12 Move models to a computer without a network](#412-move-models-to-a-computer-without-a-network)
-  - [4.13 Install the engines without a network](#413-install-the-engines-without-a-network)
-  - [4.14 Sign and verify bundles](#414-sign-and-verify-bundles)
-  - [4.15 Make a software bill of materials](#415-make-a-software-bill-of-materials)
-  - [4.16 Use local scanners](#416-use-local-scanners)
-  - [4.17 Isolate the engines](#417-isolate-the-engines)
-  - [4.18 Test the behaviour of a model](#418-test-the-behaviour-of-a-model)
-  - [4.19 Limits of the security checks](#419-limits-of-the-security-checks)
-- [5. Monitor and correct problems](#5-monitor-and-correct-problems)
-  - [5.1 Do a check of llmserver](#51-do-a-check-of-llmserver)
-  - [5.2 Recover after a crash of llmserver](#52-recover-after-a-crash-of-llmserver)
-  - [5.3 Problems and corrective actions](#53-problems-and-corrective-actions)
-- [6. Reference data](#6-reference-data)
-  - [6.1 Commands](#61-commands)
-  - [6.2 Options](#62-options)
-  - [6.3 Model names](#63-model-names)
-  - [6.4 Settings](#64-settings)
-  - [6.5 Files and folders](#65-files-and-folders)
-  - [6.6 Verdicts](#66-verdicts)
-  - [6.7 VRAM guard](#67-vram-guard)
-  - [6.8 Engine builds](#68-engine-builds)
-  - [6.9 Exit status](#69-exit-status)
-  - [6.10 Limits](#610-limits)
-  - [6.11 Security rules](#611-security-rules)
-  - [6.12 Check record](#612-check-record)
-  - [6.13 Bundle format](#613-bundle-format)
-- [7. Undo, restore and remove](#7-undo-restore-and-remove)
-  - [7.1 Stop models](#71-stop-models)
-  - [7.2 Remove a pin](#72-remove-a-pin)
-  - [7.3 Undo a start that failed](#73-undo-a-start-that-failed)
-  - [7.4 Go back to the previous engine build](#74-go-back-to-the-previous-engine-build)
-  - [7.5 Go back to the specified versions](#75-go-back-to-the-specified-versions)
-  - [7.6 Repair an engine](#76-repair-an-engine)
-  - [7.7 Reset the settings](#77-reset-the-settings)
-  - [7.8 Withdraw an approval](#78-withdraw-an-approval)
-  - [7.9 Delete the check records](#79-delete-the-check-records)
-  - [7.10 Remove skills](#710-remove-skills)
-  - [7.11 Uninstall llmserver](#711-uninstall-llmserver)
-- [Sources](#sources)
-- [License](#license)
+1. [Introduction](#1-introduction)
+2. [Get started](#2-get-started)
+3. [Operate llmserver](#3-operate-llmserver)
+4. [Control the security of models and skills](#4-control-the-security-of-models-and-skills)
+5. [Monitor and correct problems](#5-monitor-and-correct-problems)
+6. [Reference data](#6-reference-data)
+7. [Undo, restore and remove](#7-undo-restore-and-remove)
 
 ---
 
@@ -212,7 +20,9 @@ For each step in detail, see [2. Get started](#2-get-started).
 
 ### 1.1 What llmserver is
 
-llmserver is one script for Linux. It operates large language models (LLMs) on your computer.
+**One script for Linux that operates local large language models (LLMs) with llama.cpp, vLLM or Ollama. Each model gets its own OpenAI-compatible API. A web chat with document search and private web search is included.**
+
+It installs all that it needs into one folder, `~/.llmserver`. It does not use Docker or sudo, and it does not install system packages. Each download has a fixed version and a fixed SHA-256 checksum.
 
 Each model gets its own network port and its own OpenAI-compatible endpoint: `http://HOST:PORT/v1`. Clients that use the OpenAI API can connect to the endpoint.
 
@@ -247,26 +57,36 @@ llmserver keeps all its files in one folder: `~/.llmserver`. This folder is the 
 - The logs in `logs/`, and the records of the running models in `state/`.
 - The skills for AI agents in `skills/`, and the security records in `trust/`.
 
-Only the home folder (mode 700) contains llmserver files. To remove llmserver, use [7.11](#711-uninstall-llmserver). To use a different folder, see [3.27](#327-move-the-llmserver-home).
+The home folder (mode 700) contains all llmserver files. Some commands also write outside the home, but only when you use them:
 
-The model files are not in the home. They stay in the shared caches (`~/.cache/huggingface/hub` and `~/.ollama/models`), so that other programs can use them. To keep the model files in the home, set `LLMSERVER_MODEL_STORE=private`.
+| Command | Writes |
+|---|---|
+| `skills add` | Links in `~/.agents/skills` and `~/.claude/skills` |
+| `autostart on` | systemd user services in `~/.config/systemd/user` |
+| `hf --link` | `~/.local/bin/hf` |
+| `backup` | The backup file that you name |
+| `models share on` | A marked block of two lines in `~/.profile` (and `~/.bash_profile`, `~/.bash_login` or `~/.zshenv`). `models share off` and `uninstall` remove it |
+
+To remove llmserver, use [7.11](#711-uninstall-llmserver). To use a different folder, see [3.27](#327-move-the-llmserver-home).
+
+The model files are not in the home. They stay in the shared caches (`~/.cache/huggingface/hub` and `~/.ollama/models`), so that other programs can use them. To keep the model files in the home, set `LLMSERVER_MODEL_STORE=private`. Other tools can then use them too, see [3.36](#336-keep-the-model-files-in-the-home-and-share-them-with-other-tools).
 
 llmserver does not change your operating system:
 
 - It does not use sudo.
 - It does not install system packages.
 - It does not use the system Python or your Python.
-- It does not change `PATH` or your shell files.
+- It does not change `PATH`. It changes your login files only when you type `llmserver models share on`.
 - It does not install system services.
 
 From the operating system, llmserver needs only the GPU kernel driver. The Vulkan build of llama.cpp also needs the Vulkan driver of the graphics system.
 
 ### 1.4 Safety of downloads
 
-- Each file that llmserver downloads has a fixed version and a fixed SHA-256 checksum in the script.
+- Each engine archive, uv and the helper packages of llmserver have a fixed version and a fixed SHA-256 checksum in the script.
 - llmserver does a check of each file before it uses the file. If the checksum is not correct, llmserver deletes the file. It does not install it.
 - llmserver uses HTTPS only.
-- Python packages come from lock files that contain a checksum for each file.
+- Python packages come from lock files that contain a checksum for each file. For vLLM, Open WebUI, SearXNG and garak, llmserver makes the lock file from the package servers at the first installation (the main package has a fixed version). Later installations, rebuilds and bundles use the same lock file. A package that was changed on the server before the first installation is not found. `llmserver versions --sbom` lists each locked package, for a vulnerability scanner.
 - llmserver records a checksum of each engine after installation. Then it can find changes to the engine later.
 - Before llmserver downloads a model, it reads the Hugging Face scan results of each file. It downloads only the files that the engine needs, at a fixed commit, and does a check of each file. See [4](#4-control-the-security-of-models-and-skills).
 
@@ -294,6 +114,10 @@ The single-folder layout was tested with an upgrade from version 2.0.0 (with a r
 
 The menu, settings, key and autostart commands were tested with a terminal (for the questions) and without one. `autostart` was tested with a simulated `systemctl` only. `chat` was tested with a real llama.cpp model, and with a simulated server for the errors. Open WebUI 0.12.3 was installed with `llmserver install webui` and tested in the sandbox: account creation, the model list through the gateway, and a chat with a real llama.cpp model. The gateway on the network was tested with and without the API key. Hybrid document search was tested with the real Open WebUI and the real fast reranker. The best reranker was tested with the real bge-reranker-v2-m3 file on a real llama.cpp (CPU): a question in English found the answer in a French passage first. SearXNG was installed from the real source (with git; the archive host was blocked on the test network) and answered real searches. Open WebUI got the search results; the test network could not resolve the result pages, so the reading of web pages was not tested. A local GGUF file was tested with a real llama.cpp that was unpacked into a folder of the user (`llama_source`), and the installation from a downloaded llama.cpp release file was tested with the real file.
 
+The changes of 2.7.2 were tested with the real runtime, the real Hugging Face, a simulated llama.cpp, a simulated Open WebUI and a stand-in for bubblewrap (bubblewrap was not available on the test computer): the clean environment of the engines, the sandbox arguments, the start of a menu model by the gateway and its idle stop, the API key on the gateway, the first start of Open WebUI on `127.0.0.1`, a model file with a new time, quoted engine flags in the menu, `backup`, `restore` (also with a file that is not a backup), `models prune` with two simulated commits, and the selection of the vLLM files in subfolders. HTTPS for Open WebUI was not tested with the real Open WebUI.
+
+The changes of 2.7.3 were tested in a test home: `models share on`, `off` and the status, a dry run, a second `on`, a login shell that got the variables, a `~/.bash_profile` that reads `~/.profile`, a variable that the user set before, a `~/.profile` that is a link, a block without its end line (llmserver kept it), `doctor`, and `uninstall --purge-models` with a file of another tool in `models/` (llmserver kept it).
+
 The vLLM installation method was tested on a small package only. GPU operation was tested with simulated GPUs only. Before your first real start, use `llmserver check`, `llmserver capacity` and `--dry-run`.
 
 ---
@@ -312,32 +136,42 @@ Make sure that the computer agrees with these requirements:
 | Recommended programs | `ss` or `lsof`, `flock`, `setsid`, `timeout`. `numactl` or `taskset` for NUMA computers. `pgrep` for `doctor` |
 | C library | glibc 2.35 or newer. glibc 2.39 or newer for the CUDA builds of llama.cpp and for vLLM on AMD |
 | GPU driver | NVIDIA: the NVIDIA driver with `nvidia-smi`. AMD: the `amdgpu` kernel driver. vLLM and Ollama on AMD also need `amdkfd` |
-| Disk | About 200 MB for the runtime, 25 to 800 MB for llama.cpp, 1.5 to 2.6 GB for Ollama, 10.5 to 14 GB for vLLM (NVIDIA includes 1.5 GB of FlashInfer kernels). Optional: 2.5 GB for Open WebUI with its document models, 150 MB for SearXNG, 0.6 GB for the best reranker. Add the size of each model plus 10% |
-| Network | HTTPS access to `github.com`, `pypi.org`, `files.pythonhosted.org`, `download.pytorch.org`, `wheels.vllm.ai`, `huggingface.co` and `registry.ollama.ai`. Web search also needs access to the public search engines. You can use mirrors (see [3.21](#321-install-through-a-firewall-or-a-mirror)) |
+| Disk | About 200 MB for the runtime, 25 to 800 MB for llama.cpp, 1.5 to 2.6 GB for Ollama, 10.5 to 14 GB for vLLM (NVIDIA includes 1.5 GB of FlashInfer kernels). Add the size of each model plus 10% |
+| Network | HTTPS access to `github.com`, `pypi.org`, `files.pythonhosted.org`, `download.pytorch.org`, `wheels.vllm.ai`, `huggingface.co` and `registry.ollama.ai`. You can use mirrors (see [3.21](#321-install-through-a-firewall-or-a-mirror)) |
 
 > **NOTE:** You do not need Python on the computer. llmserver installs its own Python.
 
 ### 2.2 Install the script
 
-1. Make the script executable:
+1. Do a check of the script against the `SHA256SUMS` file of the release:
+
+   ```bash
+   sha256sum -c --ignore-missing SHA256SUMS
+   ```
+
+   Result: The command shows `llmserver: OK`. If it shows `FAILED`, do not use the script.
+
+   > **NOTE:** `llmserver doctor` shows the SHA-256 of the script that operates. You can compare it with the release at any time.
+
+2. Make the script executable:
 
    ```bash
    chmod +x llmserver
    ```
 
-2. Move the script to a folder in your `PATH`:
+3. Move the script to a folder in your `PATH`:
 
    ```bash
    mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
    ```
 
-3. Do a check of the version:
+4. Do a check of the version:
 
    ```bash
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.7.1`.
+   Result: The command shows `llmserver 2.7.3`.
 
 ### 2.3 Do the setup
 
@@ -561,6 +395,8 @@ ollama:NAME:TAG              OLLAMA_NUM_PARALLEL=2
 
 > **NOTE:** These words after a model are for llmserver, not for the engine: `port=N`, `draft=MODEL` and `draft-n=N`.
 
+> **NOTE:** To give a flag value that has spaces, put it in single or double quotes, for example `--chat-template-kwargs '{"enable_thinking": false}'`. `model add` writes the quotes for you. Other escapes (`\`) are not supported.
+
 > **NOTE:** When you start a model by its name, llmserver adds it to the menu.
 
 > **NOTE:** A name has the form `[engine:]owner/model`, for example `Qwen/Qwen3-8B` or `vllm:Qwen/Qwen3-8B`. If you do not write an engine, llmserver selects one. A colon without an engine (`:Qwen/Qwen3-8B`) is the same as no engine.
@@ -769,6 +605,8 @@ ollama:NAME:TAG              OLLAMA_NUM_PARALLEL=2
 >
 > If a variable in your environment overrides the file, `llmserver config set` tells you.
 
+> **NOTE:** llmserver uses `/etc/llmserver_env` only if root (or you) owns it and other users cannot change it or its folder. Else llmserver ignores the file and `llmserver config list` shows a warning. This file can name programs, so a file that other users can change is not safe.
+
 > **NOTE:** The settings file has mode 600 (only you can read it). `LLMSERVER_HOME` cannot be in this file, because the file is in the home (see [3.27](#327-move-the-llmserver-home)).
 
 ### 3.13 Measure the speed
@@ -861,6 +699,8 @@ ollama:NAME:TAG              OLLAMA_NUM_PARALLEL=2
 
 > **CAUTION:** The API key does not encrypt the traffic. On a network that is not trusted, use a TLS proxy.
 
+> **CAUTION:** With `LLMSERVER_AUTH=auto` (the default), a model on `127.0.0.1` does not need the key. Other users who can log in to this computer can then use your models. On a shared computer, type `llmserver config set auth key` and start the models again with `--restart`. Then each client needs the key, also on this computer. `llmserver doctor` tells you when other accounts can log in. Ollama cannot check a key: on a shared computer, use llama.cpp or vLLM.
+
 ### 3.17 Operate llmserver in a container
 
 1. Give the container access to the GPUs. For NVIDIA, use the NVIDIA container toolkit. For AMD, pass `/dev/kfd` and `/dev/dri`.
@@ -933,6 +773,8 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
    llmserver upgrade
    ```
 
+   Result: llmserver updates the runtime and each component that is installed: the engines in the llmserver home, Open WebUI and SearXNG. It does not install a component that is not installed. It deletes the older version of Open WebUI and SearXNG when they do not operate.
+
 2. To install the newest version of an engine, use `--latest`:
 
    ```bash
@@ -948,6 +790,8 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
    ```
 
 > **NOTE:** Models that operate keep the old engine until you start them again.
+
+> **NOTE:** `--latest` applies to uv, llama.cpp, Ollama and vLLM. Open WebUI and SearXNG stay at the versions that the script specifies. A new llmserver release brings new versions.
 
 > **NOTE:** To go back to the old engine, see [7.4](#74-go-back-to-the-previous-engine-build).
 
@@ -1023,7 +867,7 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
    llmserver capacity --json | jq '.at_once.count'
    ```
 
-> **NOTE:** These commands accept `--json`: `ps`, `check`, `capacity`, `list`, `doctor`, `versions`, `trust`, `models` and `skills`. Sizes are in MiB and times are in seconds.
+> **NOTE:** These commands accept `--json`: `ps`, `check`, `capacity`, `list`, `doctor`, `versions`, `trust`, `models`, `skills`, `eval`, `config` and `bench`. Sizes are in MiB and times are in seconds.
 
 ### 3.24 Use the Hugging Face CLI
 
@@ -1142,6 +986,12 @@ There are two types of skills:
 
    Result: llmserver finds that the folder moved. It adjusts the Python environments, the links in the folder and the links to the skills. It shows how many items it adjusted.
 
+5. If you share the model files with other tools ([3.36](#336-keep-the-model-files-in-the-home-and-share-them-with-other-tools)), write the new folder into your login files:
+
+   ```bash
+   llmserver models share on
+   ```
+
 ### 3.28 Chat with a model
 
 1. Start a chat with a specified model (a menu number, a name or a port):
@@ -1221,7 +1071,7 @@ There are two types of skills:
 
 > **NOTE:** llmserver uses the file where it is. It does not copy, move or delete it: `model rm --purge`, `model purge` and `uninstall` keep it.
 
-> **NOTE:** At each start, llmserver makes sure that the file did not change (size and modification time). If the file changed, llmserver does the checks again and asks again. `llmserver doctor --deep` also compares the SHA-256.
+> **NOTE:** At each start, llmserver makes sure that the file did not change (size and modification time). If only the time changed, llmserver compares the SHA-256 again: if it is the same, the model starts. If the file changed, llmserver does the checks again and asks again. `llmserver doctor --deep` also compares the SHA-256.
 
 > **NOTE:** A model that is split into parts (`...-00001-of-00003.gguf`) is added with its first part. All parts must be in the same folder. If the folder has a vision projector (`mmproj-*.gguf`), llmserver gives it to llama.cpp.
 
@@ -1243,7 +1093,19 @@ Open WebUI is a web chat. People open it in a browser, log in, select one of the
 
    Result: The first time, llmserver asks to install Open WebUI 0.12.3 (about 2.5 GB, with CPU PyTorch) into `~/.llmserver/tools`. Then it starts the gateway (see [3.33](#333-use-one-address-for-all-models-the-gateway)) and Open WebUI, and shows the address, for example `http://192.168.1.20:3000`.
 
-2. Open the address in a browser and create the first account. The first account is the administrator.
+2. Create the first account. The first account is the administrator.
+
+   On the first start, Open WebUI operates on `127.0.0.1` only, also when `LLMSERVER_WEBUI_HOST` is `0.0.0.0`. This prevents a person on the network from creating the administrator account before you. Do these steps:
+
+   1. On this computer, open the address that llmserver shows, for example `http://127.0.0.1:3000`. From a different computer, first type `ssh -L 3000:127.0.0.1:3000 USER@HOST`, then open the same address there.
+   2. Create the account.
+   3. Make Open WebUI available on the network:
+
+      ```bash
+      llmserver webui restart
+      ```
+
+      Result: Open WebUI operates on the network address. `llmserver webui status` shows the address.
 
 3. Give the address to the other people. To let them in, do one of these steps in Open WebUI as the administrator:
    - Add their accounts in **Admin Panel > Users**.
@@ -1251,7 +1113,7 @@ Open WebUI is a web chat. People open it in a browser, log in, select one of the
 
 4. Start the models that the people can use, for example `llmserver 1`. Open WebUI shows every running model. A model that you start later shows immediately. A model that you stop disappears.
 
-5. Show the state, or stop Open WebUI and the services that it uses:
+5. Show the state, or stop Open WebUI and the services that it started:
 
    ```bash
    llmserver webui status
@@ -1271,6 +1133,7 @@ To start Open WebUI when you log in, type `llmserver autostart on webui`.
 | `LLMSERVER_WEBUI_HOST` | `0.0.0.0` | `0.0.0.0`: people on the network can use it. `127.0.0.1`: only this computer |
 | `LLMSERVER_WEBUI_PORT` | `3000` | The port of Open WebUI |
 | `LLMSERVER_WEBUI_AUTH` | `on` | `off` (no login) is permitted only with `LLMSERVER_WEBUI_HOST=127.0.0.1` |
+| `LLMSERVER_WEBUI_TLS_CERT`, `LLMSERVER_WEBUI_TLS_KEY` | empty | Your certificate (PEM, with its chain) and its private key. When both are set, Open WebUI uses HTTPS |
 | `LLMSERVER_WEBUI` | `ask` | `ask`: the setup asks if it must install Open WebUI. `on`: the setup installs it. `off`: the setup does not ask |
 
 llmserver sets up Open WebUI for safe use on a network:
@@ -1289,7 +1152,34 @@ Documents and web search: see [3.31](#331-find-answers-in-documents-hybrid-searc
 
 > **NOTE:** Open WebUI has its own license. You must keep its "Open WebUI" branding if more than 50 people use it in 30 days, unless you have an enterprise license.
 
-> **NOTE:** The traffic between the browsers and Open WebUI is not encrypted. On a network that is not trusted, put a TLS proxy in front of it.
+> **NOTE:** `llmserver webui stop` stops Open WebUI, and SearXNG, the best reranker and the gateway if `webui start` started them. A gateway that you started yourself continues to operate.
+
+#### Use HTTPS
+
+Without HTTPS, the passwords and the chats go across the network without encryption. To use HTTPS, you need a certificate for the name or the address that people use, for example from your company or from `mkcert`.
+
+1. Set the certificate and its key:
+
+   ```bash
+   llmserver config set webui_tls_cert /etc/ssl/llm/cert.pem
+   llmserver config set webui_tls_key /etc/ssl/llm/key.pem
+   ```
+
+2. Make sure that only you can read the key:
+
+   ```bash
+   chmod 600 /etc/ssl/llm/key.pem
+   ```
+
+3. Start Open WebUI again:
+
+   ```bash
+   llmserver webui restart
+   ```
+
+   Result: The address starts with `https://`. In the sandbox, Open WebUI can read only these two files.
+
+To go back to HTTP, type `llmserver config unset webui_tls_cert` and `llmserver config unset webui_tls_key`, then `llmserver webui restart`.
 
 ### 3.31 Find answers in documents (hybrid search)
 
@@ -1377,7 +1267,50 @@ Each model has its own port. The gateway gives all running models one OpenAI-com
 
 2. Give the address to the client, for example `OPENAI_BASE_URL=http://127.0.0.1:8000/v1`.
 
-> **NOTE:** By default, the gateway accepts only clients on this computer. To make it available on the network, set `llmserver config set gateway_host 0.0.0.0`. Clients on the network then must send the API key (`llmserver env MODEL` shows it). Clients on this computer never need it.
+> **NOTE:** By default, the gateway accepts only clients on this computer. To make it available on the network, set `llmserver config set gateway_host 0.0.0.0`. Clients on the network then must send the API key (`llmserver env MODEL` shows it). Clients on this computer need the key only with `LLMSERVER_AUTH=key` (see [3.16](#316-make-the-models-available-on-the-network)).
+
+> **NOTE:** The gateway accepts 64 requests at the same time. More requests get the status 503. A client that sends nothing for 60 seconds is disconnected. An answer that streams has no time limit.
+
+#### Start models on demand
+
+The gateway can start a menu model when a request names it, and stop it after an idle time.
+
+1. Turn it on, and set the idle time in minutes (`0` is never):
+
+   ```bash
+   llmserver config set gateway_autoload on
+   llmserver config set gateway_idle_stop 30
+   ```
+
+2. Start the gateway again:
+
+   ```bash
+   llmserver gateway stop
+   llmserver gateway start
+   ```
+
+   Result: `GET /v1/models` lists the running models and the menu models that passed the security checks on this computer. A request for a model that does not operate starts it, then gets the answer.
+
+> **CAUTION:** The gateway starts only a model that has a check record on this computer. It does not download a model, and it does not answer a security question. Start a new model one time yourself (`llmserver MODEL`). For other models, the request gets the status 503 with the reason.
+
+> **NOTE:** To make space, the gateway obeys `LLMSERVER_EVICT`. `ask` is the same as `never`, because there is nobody to ask. The gateway never stops a pinned model. The idle stop applies only to the models that the gateway started.
+
+> **NOTE:** The gateway starts models with the settings in `llmserver.env`, not with the settings in your shell.
+
+#### Monitor the gateway
+
+The gateway gives counters in the Prometheus format at `/metrics`, with the same access rules as the models:
+
+```bash
+curl -s http://127.0.0.1:8000/metrics
+```
+
+| Metric | Contents |
+|---|---|
+| `llmserver_requests_total` | Requests, by model, path and status |
+| `llmserver_requests_in_flight` | Requests that operate now |
+| `llmserver_models_running` | Models behind the gateway |
+| `llmserver_models_started_by_gateway` | Models that the gateway started and can stop |
 
 > **NOTE:** The gateway log (`~/.llmserver/logs/gateway.log`) has one line for each request: the time, the client, the model and the result. It does not keep the text of the messages.
 
@@ -1408,6 +1341,122 @@ Versions before 2.1 kept their files in four places. At the first start, version
    Result: llmserver shows each move. The skills move when you next use `llmserver skills`, `llmserver doctor` or `llmserver upgrade`.
 
 > **NOTE:** If `~/.llmserver_env` contains `LLMSERVER_HOME`, llmserver uses that folder for the move. After the move, set `LLMSERVER_HOME` in the environment or in `/etc/llmserver_env`.
+
+### 3.35 Back up and restore the settings and the data
+
+A backup contains what llmserver cannot download again: the settings, the menu, the API key, the secret keys, the check records, the ports, the pins, the skills, and the accounts, chats and uploads of Open WebUI. It does not contain the engines or the models.
+
+1. Make a backup:
+
+   ```bash
+   llmserver backup -o ~/llmserver-backup.tar.gz
+   ```
+
+   Result: llmserver writes one file with mode 600. It copies the database of Open WebUI consistently, also while Open WebUI operates.
+
+   > **CAUTION:** The backup contains your API key and your secret keys. Keep it in a safe place.
+
+2. To restore a backup, stop the models and the services:
+
+   ```bash
+   llmserver stop all
+   llmserver webui stop
+   llmserver gateway stop
+   ```
+
+3. Restore the backup:
+
+   ```bash
+   llmserver restore ~/llmserver-backup.tar.gz
+   ```
+
+   Result: llmserver asks, then replaces the settings and the data with the backup. It refuses a file that contains other files, links or paths.
+
+4. Do a check:
+
+   ```bash
+   llmserver doctor
+   ```
+
+> **NOTE:** On a different computer, install the engines first (`llmserver install`). The models download again at their first start.
+
+### 3.36 Keep the model files in the home and share them with other tools
+
+By default, the model files are in the shared caches (`~/.cache/huggingface/hub` and `~/.ollama/models`). With `LLMSERVER_MODEL_STORE=private`, they are in `~/.llmserver/models`. Other tools (the `hf` command, Python programs that use Hugging Face, Ollama) do not find them there.
+
+`llmserver models share on` tells these tools where the model files are. It adds two environment variables to your login files. It does not move folders and it does not make links.
+
+| Variable | Value | Used by |
+|---|---|---|
+| `HF_HUB_CACHE` | `~/.llmserver/models/huggingface/hub` | `hf`, transformers, vLLM and other Hugging Face tools |
+| `OLLAMA_MODELS` | `~/.llmserver/models/ollama` | Ollama |
+
+1. Keep the model files in the home:
+
+   ```bash
+   llmserver config set model_store private
+   ```
+
+   > **NOTE:** llmserver does not move the files that are in the shared caches. A model downloads again into the home at its next start. Delete the old copy when you do not need it, for example with `ollama rm` or with the Hugging Face CLI.
+
+2. Show what llmserver will write. This changes nothing:
+
+   ```bash
+   llmserver models share on -n
+   ```
+
+3. Share the model files:
+
+   ```bash
+   llmserver models share on
+   ```
+
+   Result: llmserver writes a block of lines into these files:
+   - `~/.profile` (always);
+   - `~/.bash_profile` or `~/.bash_login`, when that file exists and does not read `~/.profile`;
+   - `~/.zshenv`, when zsh is your login shell or the file exists.
+
+4. Log in again. Or, in the shell that you use now, type:
+
+   ```bash
+   . ~/.profile
+   ```
+
+5. Do a check:
+
+   ```bash
+   llmserver models share
+   ```
+
+   Result: llmserver shows the store, the two folders, and the files that contain the block.
+
+To stop the sharing, type `llmserver models share off`. The model files stay in the home.
+
+The block looks like this:
+
+```sh
+# >>> llmserver models share >>>
+# Other tools use llmserver's model files. 'llmserver models share off' removes this block.
+if [ -d '/home/you/.llmserver/models/huggingface/hub' ]; then export HF_HUB_CACHE='/home/you/.llmserver/models/huggingface/hub'; fi
+if [ -d '/home/you/.llmserver/models/ollama' ]; then export OLLAMA_MODELS='/home/you/.llmserver/models/ollama'; fi
+# <<< llmserver models share <<<
+```
+
+> **NOTE:** Each line applies only when its folder exists. After an uninstall, the lines do nothing. `llmserver uninstall` also removes them.
+
+> **NOTE:** If you set `HF_HOME`, `HF_HUB_CACHE` or `OLLAMA_MODELS` yourself (in your shell or in `llmserver.env`), llmserver uses your value. It does not write a line for that variable.
+
+> **NOTE:** If a login file is a link (for example from a dotfile manager), llmserver changes the file that the link points to. It does not replace the link.
+
+> **NOTE:** These programs do not read the login files:
+> - systemd services. For a user service, add `Environment=OLLAMA_MODELS=...` with `systemctl --user edit SERVICE`.
+> - The Ollama system service. It operates as the user `ollama` and cannot read your home (mode 700). Use the Ollama engine of llmserver, or start `ollama serve` as yourself.
+> - Programs that started before you logged in again.
+> - The fish shell. Set the variables with `set -Ux`.
+
+> **CAUTION:** Other tools can now write to `~/.llmserver/models` and delete from it. llmserver finds a changed model file at the next start, because it compares the file with its check record. Then it asks again or refuses. `models prune` and `uninstall --purge-models` delete only the files that llmserver downloaded.
+
+Why not links: a link such as `~/.cache` to `~/.llmserver/.cache` puts the files of all your programs (settings, keys, browser data) into the llmserver home. `uninstall` and `restore` would then delete or replace them, and the sandbox would have them in its folder. Two variables give the same result for the model files and nothing more.
 
 ---
 
@@ -1543,7 +1592,7 @@ Do this procedure for `SECURITY=strict`, or for a model that runs its own Python
 
    Result: The command shows each file that changed. The exit status is 3 if a file changed.
 
-> **NOTE:** Each start compares the size of each file. `trust verify` and `doctor --deep` also compare the SHA-256 checksums.
+> **NOTE:** Each start compares the size and the modification time of each file. If only the time changed, llmserver compares the SHA-256 of that file. `trust verify` and `doctor --deep` compare the SHA-256 checksums of all files.
 
 ### 4.7 Update a model to a new commit
 
@@ -1570,6 +1619,15 @@ Do this procedure for `SECURITY=strict`, or for a model that runs its own Python
 > **NOTE:** With `SECURITY=strict`, `models update` shows the command that approves the new commit.
 
 > **NOTE:** llmserver never uses a new commit automatically. A model uses its recorded commit until you update it.
+
+4. After an update, the files of the old commit stay in the cache. To delete them:
+
+   ```bash
+   llmserver models prune -n
+   llmserver models prune
+   ```
+
+   Result: With `-n`, llmserver shows the files and changes nothing. Then it asks and deletes the files of older commits that it downloaded, and their check records. It keeps each file that a current commit also uses, and the commit of each model that operates.
 
 ### 4.8 Lock a menu entry to a commit
 
@@ -1760,9 +1818,13 @@ If bubblewrap (`bwrap`) is installed, llmserver starts each engine in a sandbox:
 - The home folder is empty. The engine cannot read SSH keys, cloud credentials, tokens or your files.
 - The model files are read-only. The Ollama store is writable.
 - From the llmserver home, the engine sees only the engines and Python, read-only. It cannot see the settings, the API key, the logs or the records.
+- The engine sees only its own processes. It cannot read the files or the environment of your other programs through `/proc`.
+- The folder of your session sockets (`/run/user/UID`: D-Bus, systemd, the SSH agent, the keyring) is empty.
 - Each engine has its own cache folder in `~/.llmserver/state/sandbox/`.
 - `/tmp` is private.
 - The GPUs and the network stay available. The server must listen on its port.
+
+Each engine also gets a clean environment, with or without the sandbox. It gets `PATH`, `HOME`, the language variables, the variables of the GPU and engine programs (for example `CUDA_*`, `HIP_*`, `ROCM_*`, `VLLM_*`, `OLLAMA_*`, `OMP_*`), `LD_LIBRARY_PATH`, and the variables in `llmserver.env`. Other variables in your shell, for example cloud keys, tokens and `SSH_AUTH_SOCK`, do not go to the engine. To give a variable to the engines, type `llmserver config set NAME VALUE`.
 
 1. Install bubblewrap with the package manager of your system, for example:
 
@@ -1792,7 +1854,7 @@ If bubblewrap (`bwrap`) is installed, llmserver starts each engine in a sandbox:
 
 > **NOTE:** If an engine needs to write to a different folder, add the folder to `LLMSERVER_SANDBOX_RW` (absolute paths, separated by spaces).
 
-> **NOTE:** The sandbox does not limit the network. llmserver starts the engines offline, but code in a model could still connect to the network.
+> **NOTE:** The sandbox does not limit the network. llmserver starts the engines offline, but code in a model could still connect to the network. It could also connect to abstract sockets (for example an X11 display) and to the system D-Bus.
 
 ### 4.18 Test the behaviour of a model
 
@@ -1832,6 +1894,7 @@ The checks do not find all problems:
 - A skill can be harmful in plain words that no pattern finds.
 - A person with your user rights can change the files and the records.
 - Without bubblewrap, an engine runs with all your user rights. With bubblewrap, it can still use the network.
+- The engine gets its API key in its environment, so code in a model can read that key.
 
 ---
 
@@ -1865,7 +1928,10 @@ The checks do not find all problems:
 - models that an interrupted start stopped;
 - ports that two models use;
 - temporary files, the lock, and the limits of the container;
-- inference servers that llmserver did not start.
+- inference servers that llmserver did not start;
+- the SHA-256 of the script (compare it with the release);
+- other accounts that can log in, when models on `127.0.0.1` need no key;
+- the `models share` block: it must point to this home, and the store must be `private`.
 
 `doctor --fix` repairs the engines in two different ways:
 
@@ -1904,6 +1970,19 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | Message or symptom | Cause | Corrective action |
 |---|---|---|
 | `runs on Linux only` | The operating system is not Linux | Use Linux or WSL2 |
+| `/etc/llmserver_env ... it was ignored` | Other users can change the system settings file or its folder | An administrator types `sudo chown root: /etc/llmserver_env && sudo chmod 644 /etc/llmserver_env` |
+| `other account(s) can log in to this computer` (`doctor`) | Models on `127.0.0.1` need no key, and other people use this computer | Type `llmserver config set auth key`, then start the models again with `--restart` |
+| `has not passed the security checks on this computer yet` (503 from the gateway) | A request named a menu model that never passed the checks | Start the model one time yourself: `llmserver MODEL` |
+| `the gateway is busy` (503) | 64 requests operate at the same time | Try again later |
+| Other tools do not find the model files | The store is `private`, and the tools look in the shared caches | Type `llmserver models share on`, then log in again ([3.36](#336-keep-the-model-files-in-the-home-and-share-them-with-other-tools)) |
+| `exports ... which is not in this llmserver home` (`doctor`) | You moved the llmserver home after `models share on` | Type `llmserver models share on` again |
+| `LLMSERVER_MODEL_STORE is shared, but ...` (`doctor`) | The block is in your login files, but the store is `shared` | Type `llmserver models share off`, or set the store to `private` again |
+| `vLLM had too little GPU memory for the KV cache` | The estimate of llmserver was too low | Use a smaller `--ctx`, or add `-- --gpu-memory-utilization 0.9` |
+| `has no Q4_K_M GGUF; give one of: ...` | The name has no quantization, and the repository has no Q4_K_M file | Add one of the quantizations that llmserver shows, for example `llama:ORG/REPO-GGUF:Q8_0` |
+| `has MIG enabled` | The GPU is divided into MIG instances | Do a check of the fit of each model yourself. llmserver counts the memory of the whole GPU |
+| `Open WebUI listens on this computer only until its admin account exists` | The first start of Open WebUI | Create the account on this computer, then type `llmserver webui restart` |
+| `is not an llmserver backup, or it holds other files` | `restore` got a file that is not a backup | Use a file that `llmserver backup` wrote |
+| `another setting has a problem, correct it first` | `config set` found an incorrect value in a different setting | Correct that setting first with `config set` or `config unset` |
 | `/proc and /sys must be mounted` | A container without them | Mount `/proc` and `/sys` |
 | `the X engine is not installed` | The engine is not in the llmserver home | Type `llmserver install X` |
 | `does not match its pinned checksum` | The file on the server is different | Nothing was installed. Try again later or from a different network |
@@ -1999,7 +2078,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `stop MODEL` or `stop all` | Stops one model or all models |
 | `pin MODEL`, `unpin MODEL` | Protects a model from a stop, or removes the protection |
 | `webui [start\|stop\|restart\|status]` | Open WebUI, a web chat for people on the network. Installs it on first use. `restart` applies changed settings |
-| `gateway [start\|stop\|status]` | One OpenAI-compatible address for every running model |
+| `gateway [start\|stop\|status]` | One OpenAI-compatible address for every running model, and `/metrics`. With `gateway_autoload on`, it also starts menu models on demand |
 | `chat [MODEL] [MESSAGE]` | Starts a chat with a model in the terminal. With a message, or a pipe, it answers once. `--system TEXT` sets a system prompt |
 | `env [MODEL]` | Shows the client variables |
 | `logs [MODEL]` | Shows the output of a model |
@@ -2014,6 +2093,10 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `trust list` | Shows all check records |
 | `models outdated` | Shows the models that changed on Hugging Face |
 | `models update MODEL` | Does the checks of the new commit and downloads it |
+| `models prune [-n]` | Deletes the downloaded files of older commits. `-n` shows them and changes nothing |
+| `models share [on\|off] [-n]` | With `LLMSERVER_MODEL_STORE=private`: shows, adds or removes the lines in your login files that let other tools use the model files in the home ([3.36](#336-keep-the-model-files-in-the-home-and-share-them-with-other-tools)) |
+| `backup [-o FILE]` | Writes the settings, the menu, the keys, the records, the skills and the data of Open WebUI into one private file |
+| `restore FILE` | Puts a backup back. The models and the services must be stopped |
 | `skills [list]` | Shows the installed, the generated and the marketplace skills |
 | `skills check NAME`, `skills preview NAME` | Does the checks of a skill, or shows it. Installs nothing |
 | `skills add [NAME...]` | Does the checks and installs skills. Without a name: `llmserver` and `hf-cli` |
@@ -2027,7 +2110,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `hf ARGS...` | Starts the fixed Hugging Face CLI. `--link` and `--unlink` add or remove `~/.local/bin/hf` |
 | `setup` | Does the setup |
 | `install [COMPONENT...]` | Installs `runtime`, `llama`, `ollama`, `vllm`, `all` (the engines), `webui` or `searxng` |
-| `upgrade [COMPONENT]` | Installs the specified versions, or with `--latest` the newest verified versions |
+| `upgrade [COMPONENT]` | Installs the specified versions of the installed components (or of `runtime`, `llama`, `ollama`, `vllm`, `webui`, `searxng`), or with `--latest` the newest verified versions |
 | `rollback COMPONENT` | Goes back to the previous build |
 | `versions` | Shows what is installed |
 | `doctor` | Does a check of llmserver. `--fix` repairs. `--deep` also compares the checksums of the model files |
@@ -2050,13 +2133,13 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `--no-vram-guard` | Does not refuse a model for hardware reasons |
 | `--no-preflight` | Does not check the llama.cpp flags |
 | `--draft MODEL`, `--draft-n N`, `--no-draft` | Controls speculative decoding |
-| `--json` | Writes JSON (`ps`, `check`, `capacity`, `list`, `doctor`, `versions`, `trust`, `models`) |
+| `--json` | Writes JSON (`ps`, `check`, `capacity`, `list`, `doctor`, `versions`, `trust`, `models`, `skills`, `eval`, `config`, `bench`) |
 | `--accept-risk ID` | Accepts one refused finding. The record keeps it. You can use it more than one time |
 | `--remote-code` | Approves the Python code of a model (`trust approve`) |
 | `--code` | Shows the Python code of a model (`trust show`) |
 | `--deep` | Compares the checksums of all model files (`doctor`) |
 | `--project` | Uses the current folder instead of your home folder (`skills`) |
-| `-o`, `--output FILE` | The bundle file (`export`) |
+| `-o`, `--output FILE` | The bundle file (`export`), or the backup file (`backup`) |
 | `--with-engines` | Adds the engines to the bundle (`export`) |
 | `--sign KEY` | Signs the bundle with an ssh private key (`export`) |
 | `--from FILE` | Installs from a bundle (`install`) |
@@ -2065,7 +2148,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `--force` | Replaces or removes a changed skill, or a skill that llmserver did not install (`skills`) |
 | `--fix` | Repairs (`doctor`) |
 | `--latest` | Uses the newest verified versions (`upgrade`) |
-| `-y`, `--yes` | Accepts without a question (`setup`, `install`, `uninstall`, security warnings). It does not approve the Python code of a model |
+| `-y`, `--yes` | Accepts without a question (`setup`, `install`, `uninstall`, `restore`, `models prune`, security warnings). It does not approve the Python code of a model. With `chat`, it only starts the model: security warnings of that model still need an answer |
 | `-v`, `--verbose` | Shows more details |
 | `--runs N`, `--long N`, `--gen N`, `--history` | Controls `bench` |
 | `-f`, `--errors`, `--lines N` | Controls `log` |
@@ -2122,7 +2205,10 @@ Put the settings in `~/.llmserver/llmserver.env`.
 | `LLMSERVER_ALLOW_PICKLE` | `off` | `on` permits vLLM models that have only pickle weights. Not with `strict` |
 | `LLMSERVER_SANDBOX` | `auto` | `auto`, `on` or `off`: run the engines in a bubblewrap sandbox (see [4.17](#417-isolate-the-engines)) |
 | `LLMSERVER_GATEWAY_HOST`, `LLMSERVER_GATEWAY_PORT` | `127.0.0.1`, `8000` | The address of the gateway (see [3.33](#333-use-one-address-for-all-models-the-gateway)) |
+| `LLMSERVER_GATEWAY_AUTOLOAD` | `off` | `on`: the gateway starts a checked menu model when a request names it |
+| `LLMSERVER_GATEWAY_IDLE_STOP` | `0` | Minutes: the gateway stops a model that it started after this idle time. `0` is never |
 | `LLMSERVER_WEBUI`, `_WEBUI_HOST`, `_WEBUI_PORT`, `_WEBUI_AUTH` | `ask`, `0.0.0.0`, `3000`, `on` | Open WebUI (see [3.30](#330-give-people-on-the-network-a-web-chat-open-webui)) |
+| `LLMSERVER_WEBUI_TLS_CERT`, `_WEBUI_TLS_KEY` | empty | HTTPS for Open WebUI: your certificate and its private key |
 | `LLMSERVER_WEBUI_RAG` | `hybrid` | `hybrid` (keywords and meaning, then the reranker) or `vector` (see [3.31](#331-find-answers-in-documents-hybrid-search)) |
 | `LLMSERVER_WEBUI_RERANKER` | `fast` | `fast` (CPU), `best` (bge-reranker-v2-m3 on llama.cpp) or `off` |
 | `LLMSERVER_WEBUI_SEARCH`, `_WEBUI_SEARCH_PORT` | `off`, `8888` | Web search through a private SearXNG on `127.0.0.1` (see [3.32](#332-search-the-web-from-the-chat-searxng)) |
@@ -2140,11 +2226,11 @@ Put the settings in `~/.llmserver/llmserver.env`.
 | `LLMSERVER_LLAMA_BUILD` | `auto` | `auto`, `cpu`, `vulkan`, `cuda-12.8` or `cuda-13.4` |
 | `LLMSERVER_AUTO_INSTALL` | `on` | `on` installs the runtime when necessary |
 | `LLMSERVER_HOME` | `~/.llmserver` | The llmserver home. Only in the environment or in `/etc/llmserver_env` |
-| `LLMSERVER_MODEL_STORE` | `shared` | `shared`: the model files go into the shared caches. `private`: into `models/` in the llmserver home. `HF_HOME`, `HF_HUB_CACHE` and `OLLAMA_MODELS` have priority |
+| `LLMSERVER_MODEL_STORE` | `shared` | `shared`: the model files go into the shared caches. `private`: into `models/` in the llmserver home. `HF_HOME`, `HF_HUB_CACHE` and `OLLAMA_MODELS` have priority. To let other tools use the private store, see `models share` |
 | `LLMSERVER_GITHUB`, `LLMSERVER_GITHUB_API`, `LLMSERVER_PYPI`, `LLMSERVER_VLLM_ROCM_INDEX`, `LLMSERVER_FLASHINFER_INDEX` | the public servers | The download and update servers |
 | `LLMSERVER_SYSFS`, `LLMSERVER_PROCFS`, `LLMSERVER_DEVFS` | `/sys`, `/proc`, `/dev` | The locations of the system information |
 
-You can also put engine variables in the file, for example `HF_TOKEN`, `HF_HOME`, `OLLAMA_MODELS` and `UV_INDEX_URL`.
+You can also put engine variables in the file, for example `HF_TOKEN`, `HF_HOME`, `OLLAMA_MODELS` and `UV_INDEX_URL`. The engines get these variables (see [4.17](#417-isolate-the-engines)).
 
 ### 6.5 Files and folders
 
@@ -2160,7 +2246,7 @@ All paths in the first table are in the llmserver home, `~/.llmserver` (mode 700
 | `logs/models/` | The output of each model |
 | `logs/ollama-pull.log`, `logs/garak.log` | The output of Ollama downloads and of garak |
 | `logs/gateway.log`, `logs/webui.log`, `logs/searxng.log` | The requests through the gateway (no message text), and the output of Open WebUI and SearXNG |
-| `state/services/` | One record each for the gateway, Open WebUI and SearXNG when they operate |
+| `state/services/` | One record each for the gateway, Open WebUI and SearXNG when they operate. `gateway-menu.tsv`: the menu models that the gateway can start |
 | `webui/` | Open WebUI: `data/` (accounts, chats, uploads), its embedding model and reranker, its home folder, the generated SearXNG settings, and `llmserver-applied.json` (the values llmserver last wrote into its settings) |
 | `config/webui-secret`, `config/searxng-secret` | The secret keys of Open WebUI and SearXNG (mode 600) |
 | `config/searxng.yml` | Your SearXNG settings, if you made this file. Else llmserver writes its own |
@@ -2176,7 +2262,7 @@ All paths in the first table are in the llmserver home, `~/.llmserver` (mode 700
 | `tools/garak/` | garak and its results, only after `llmserver eval --garak` |
 | `pins.local` | Newer pins from `llmserver upgrade --latest` |
 | `cache/`, `tmp/`, `locks/` | Downloads, work files and locks of llmserver |
-| `models/` | The model files, only with `LLMSERVER_MODEL_STORE=private` |
+| `models/` | The model files, only with `LLMSERVER_MODEL_STORE=private`. Other tools use it too after `models share on` |
 | `.llmserver-home` | The marker file. llmserver deletes or changes only a folder with this file |
 
 Other paths:
@@ -2235,7 +2321,10 @@ Other paths:
 - llama.cpp has no Linux ROCm build. On AMD, llmserver uses the Vulkan build.
 - llmserver gets the vLLM lock file from the package servers at the first installation.
 - On NVIDIA, llmserver also installs the precompiled FlashInfer kernels for vLLM, with a second lock file (`vllm-<version>-cuda-kernels.txt`). It does not use `vllm download-kernels`, because that command does not do a check of the downloads.
-- You cannot move the llmserver home without a new installation.
+- Each model name operates one time. To operate the same model two times, for example with different contexts, is not possible.
+- The memory plan is an estimate. For vLLM it can be too low; then vLLM stops at the start and llmserver tells you.
+- With MIG, llmserver counts the memory of the whole GPU.
+- Open WebUI and SearXNG change only with a new llmserver release.
 - The security checks have limits (see [4.19](#419-limits-of-the-security-checks)).
 
 ### 6.11 Security rules
@@ -2286,7 +2375,7 @@ Each check record is a JSON file in `~/.llmserver/trust/records/model/`. It cont
 
 - the engine, the model, the reference (for example `main`) and the commit;
 - the status: `accepted`, `approved` or `revoked`, with the user and the time;
-- each selected file: path, size, SHA-256 or git checksum, and the Hugging Face scan results;
+- each selected file: path, size, modification time, SHA-256 or git checksum, and the Hugging Face scan results;
 - the files that llmserver did not download, with their type;
 - the findings and the accepted risks;
 - the remote code approval;
@@ -2455,6 +2544,8 @@ To reset one setting, type `llmserver config unset NAME`. To reset all settings:
 
 > **CAUTION:** The uninstall procedure deletes the settings, the API key, the menu and the logs. It also deletes all engines in the llmserver home. Make a copy of the files that you want to keep.
 
+> **NOTE:** The uninstall procedure also removes the `models share` lines from your login files.
+
 1. Show the plan. This changes nothing:
 
    ```bash
@@ -2474,7 +2565,7 @@ To reset one setting, type `llmserver config unset NAME`. To reset all settings:
 4. Type `y` to uninstall.
 
    Result: llmserver does these steps in this sequence:
-   1. It disables and deletes the systemd units `llmserver@.service` and `llmserver.service`, if they exist.
+   1. It disables and deletes the systemd units `llmserver@.service`, `llmserver-webui.service` and `llmserver.service`, if they exist.
    2. It stops all models that it started.
    3. It deletes the models that it downloaded, if you selected this.
    4. It removes the skills that it installed and their links, if you did not change the skills.
@@ -2495,7 +2586,7 @@ Use these options if necessary:
 > - GGUF files on your computer that you added to the menu;
 > - models that other programs downloaded;
 > - `/etc/llmserver_env`;
-> - the `models/` folder in the home (with `LLMSERVER_MODEL_STORE=private`), if you do not delete the models;
+> - the `models/` folder in the home (with `LLMSERVER_MODEL_STORE=private`), if you do not delete the models. With `--purge-models`, llmserver deletes only the files that it downloaded. Files of other tools stay in `models/`;
 > - a skill that you changed. The `skills/` folder stays in the home.
 
 > **NOTE:** llmserver deletes only the model files that it downloaded. If another program uses a file, llmserver keeps the file.
@@ -2515,16 +2606,12 @@ The engine versions and checksums came from the releases of each project on 2026
 - [vLLM quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart/) and [Ollama hardware support](https://docs.ollama.com/gpu)
 - [Ultra-Fast LLM Inference on AMD Instinct MI355X (AMD ROCm Blogs)](https://rocm.blogs.amd.com/software-tools-optimization/megakernel-intro/README.html) (the origin of `bench`, speed estimates, speculative decoding, NUMA placement and tuning rules)
 
----
-
-## License
-
+License
 llmserver: Apache-2.0
-
 llmserver does not include the programs that it installs. It downloads them on your computer, and each one keeps its own license:
+• Open WebUI: the Open WebUI license (BSD-3-Clause with a branding clause). You must keep its "Open WebUI" branding if more than 50 people use it in 30 days, unless you have an enterprise license.
+• SearXNG: AGPL-3.0. llmserver installs it from its fixed source with its license. It adds only a version file.
+• llama.cpp (MIT), vLLM (Apache-2.0), Ollama (MIT), uv (Apache-2.0 or MIT).
+• Each model has its own license. llmserver trust show MODEL shows it.
 
-- Open WebUI: the Open WebUI license (BSD-3-Clause with a branding clause). You must keep its "Open WebUI" branding if more than 50 people use it in 30 days, unless you have an enterprise license.
-- SearXNG: AGPL-3.0. llmserver installs it from its fixed source with its license. It adds only a version file.
-- llama.cpp (MIT), vLLM (Apache-2.0), Ollama (MIT), uv (Apache-2.0 or MIT).
-- Each model has its own license. `llmserver trust show MODEL` shows it.
 
