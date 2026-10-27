@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-readonly PROG=llmserver VERSION=2.7.1
+readonly PROG=llmserver VERSION=2.7.3
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "$PROG: bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 1
 fi
@@ -55,6 +55,7 @@ for _c in awk sed grep sort stat readlink find od mktemp tar sha256sum; do
 done
 unset _c
 ORIG_ARGS=("$@")
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")   # this script; run again as "$BASH" "$SELF", so it works without execute permission
 
 # ---- where everything lives ------------------------------------------------------
 # One folder holds everything llmserver writes: LLMSERVER_HOME, default ~/.llmserver (mode 700).
@@ -68,7 +69,8 @@ ORIG_ARGS=("$@")
 #   trust/            check records
 #   engines/ runtime/ python/ uv/ bin/ locks/ tools/   installed software
 #   cache/ tmp/       downloads and staging (on the same disk, so installs move into place at once)
-#   models/           model files, only with LLMSERVER_MODEL_STORE=private
+#   models/           model files, only with LLMSERVER_MODEL_STORE=private ('models share on' lets
+#                     other tools use them through HF_HUB_CACHE and OLLAMA_MODELS)
 # Model files otherwise stay in the shared Hugging Face and Ollama caches, so other tools use
 # them too. /etc/llmserver_env holds system-wide settings for every user.
 #
@@ -103,7 +105,22 @@ read_env_file() {  # file: parse KEY=VALUE lines into ENVF (later files win)
     [[ $mode =~ ^[0-7]00$ ]] || ENV_WARNINGS+=("$f holds a secret and is readable by other users (mode $mode); run: chmod 600 '$f'")
   fi
 }
-read_env_file "$sys_env_file"
+sys_env_trusted() {  # the system settings file can name programs and libraries: use it only if
+  # nobody but root (or you) can change it
+  local f=$sys_env_file owner mode
+  [[ -e $f ]] || return 0
+  owner=$(stat -c %u -- "$f" 2>/dev/null) mode=$(stat -c %a -- "$f" 2>/dev/null) || return 1
+  [[ $owner == 0 || $owner == "$(id -u)" ]] || { ENV_WARNINGS+=("$f is owned by $(stat -c %U -- "$f"), not by root; it was ignored"); return 1; }
+  (( (8#$mode & 8#022) == 0 )) || { ENV_WARNINGS+=("$f can be changed by other users (mode $mode); it was ignored. An administrator can run: sudo chmod 644 '$f'"); return 1; }
+  local d=${f%/*} downer; d=${d:-/}
+  mode=$(stat -c %a -- "$d" 2>/dev/null || echo 755) downer=$(stat -c %u -- "$d" 2>/dev/null || echo 0)
+  # the folder: root's or yours, and not writable by others unless it is sticky (as /tmp)
+  if [[ $downer != 0 && $downer != "$(id -u)" ]] || (( (8#$mode & 8#022) != 0 && (8#$mode & 8#1000) == 0 )); then
+    ENV_WARNINGS+=("the folder of $f can be changed by other users; the file was ignored"); return 1
+  fi
+  return 0
+}
+sys_env_trusted && read_env_file "$sys_env_file"
 lhome=${LLMSERVER_HOME:-${ENVF[LLMSERVER_HOME]:-$HOME/.llmserver}}
 lhome=${lhome%/}
 MIGRATED=() MIGRATE_BLOCKED=""
@@ -176,6 +193,9 @@ last_file=$state_dir/last
 downloads_file=$state_dir/downloads
 lock_file=$state_dir/lock
 # model files: the shared caches (default), or LLMSERVER_MODEL_STORE=private inside LLMSERVER_HOME
+USER_HF_SET=0 USER_OLLAMA_SET=0   # set by you (shell, settings file), not by llmserver: 'models share' leaves them alone
+[[ -v HF_HUB_CACHE || -v HF_HOME ]] && USER_HF_SET=1
+[[ -v OLLAMA_MODELS ]] && USER_OLLAMA_SET=1
 if [[ $(setting LLMSERVER_MODEL_STORE shared) == private ]]; then
   [[ -v HF_HUB_CACHE || -v HF_HOME ]] || export HF_HUB_CACHE=$lhome/models/huggingface/hub
   [[ -v OLLAMA_MODELS ]] || export OLLAMA_MODELS=$lhome/models/ollama
@@ -293,7 +313,9 @@ Usage:
                               private SearXNG with 'config set webui_search on'
   $PROG gateway [start|stop|status]
                               one OpenAI-compatible address (default http://127.0.0.1:8000/v1)
-                              for every running model; Open WebUI uses it, other clients may too
+                              for every running model; Open WebUI uses it, other clients may too.
+                              With 'config set gateway_autoload on' it also starts a checked menu
+                              model when a request names it (gateway_idle_stop MINUTES stops it)
   $PROG env [MODEL]           print OPENAI_BASE_URL / OPENAI_API_KEY exports for a model
   $PROG logs [MODEL]          follow a model's server output
   $PROG log [-f] [--errors] [--lines N]
@@ -354,6 +376,16 @@ Usage:
   $PROG models outdated [--json]
                               models whose upstream moved since they were checked
   $PROG models update MODEL   check and download the new upstream commit
+  $PROG models prune [-n] [--yes]
+                              delete the downloaded files of older commits (a running model
+                              keeps its own); -n shows what would go
+  $PROG models share [on|off] [-n] [--json]
+                              with LLMSERVER_MODEL_STORE=private: let other tools (hf,
+                              Ollama, Python) use the model files in the llmserver home, by
+                              lines in your login files (~/.profile and others)
+  $PROG backup [-o FILE]      settings, menu, key, check records, skills and Open WebUI's data
+                              in one private file (not the engines or the models)
+  $PROG restore FILE          put a backup back (stop the models and services first)
   $PROG skills [list] [--json]
                               agent skills: installed, generated by llmserver, and Hugging
                               Face's skills marketplace
@@ -452,6 +484,8 @@ Log options:
       --lines N         how many lines to show (default 40)
 Uninstall options:
       --purge-models    also delete the models llmserver downloaded (never other tools' models)
+      --keep-config     keep the settings, model menu, API key and Open WebUI's data
+      --keep-script     keep the llmserver program itself
 Model options:
       --purge           with 'model rm': also delete the files llmserver downloaded
 Chat options:
@@ -459,9 +493,8 @@ Chat options:
       --think           show a reasoning model's thinking (hidden by default; '/think' toggles it)
       --reasoning LEVEL how hard a reasoning model thinks: low, medium, high, or none (no
                         thinking); sent as reasoning_effort. '/reasoning' changes it in a chat
-  -y, --yes             start MODEL without asking if it is not running
-      --keep-config     keep the settings, model menu and API key
-      --keep-script     keep the llmserver program itself
+  -y, --yes             start MODEL without asking if it is not running (security
+                        warnings still need their own answer)
   -h, --help   -V, --version
 
 Unknown options are rejected. Flags meant for the engine go after '--':
@@ -498,7 +531,7 @@ lev() {  # a b -> edit distance (short words only)
   printf '%s\n' "${prev[${#b}]}"
 }
 COMMANDS=(setup list download ps status stop env logs log start uninstall check bench capacity pin unpin doctor install upgrade
-  rollback versions trust model models config key autostart chat gateway webui skills export import eval hf)
+  rollback versions trust model models config key autostart chat gateway webui skills export import eval hf backup restore)
 cmd_typo() {  # a bare word that is not in the menu: a mistyped command? -> dies with a suggestion
   local w=${1,,} c d best="" bd=99
   [[ $1 =~ ^[A-Za-z]+$ && ${#1} -ge 2 ]] || return 0
@@ -604,11 +637,11 @@ while (($#)); do
 done
 if [[ -z $cmd && ${#positional[@]} -gt 0 ]]; then
   case ${positional[0]} in
-    setup|list|download|status|ps|stop|env|logs|log|serve|start|uninstall|check|bench|capacity|pin|unpin|doctor|install|upgrade|rollback|versions|trust|models|model|menu|config|key|autostart|chat|gateway|webui|skills|export|import|eval)
+    setup|list|download|status|ps|stop|env|logs|log|serve|start|uninstall|check|bench|capacity|pin|unpin|doctor|install|upgrade|rollback|versions|trust|models|model|menu|config|key|autostart|chat|gateway|webui|skills|export|import|eval|backup|restore)
       cmd=${positional[0]}; positional=("${positional[@]:1}") ;;
   esac
 fi
-if [[ $cmd == model || $cmd == menu || ( $cmd == models && ${positional[0]-} != @(outdated|update) ) ]]; then
+if [[ $cmd == model || $cmd == menu || ( $cmd == models && ${positional[0]-} != @(outdated|update|prune|share) ) ]]; then
   cmd=model sub=${positional[0]-list}; model_args=("${positional[@]:1}"); positional=()
   [[ $sub =~ ^(list|add|rm|remove|purge|edit)$ ]] || die "say what to do: '$PROG model list|add|rm|purge|edit' (or '$PROG models outdated|update')"
 fi
@@ -636,9 +669,9 @@ fi
 if [[ $cmd == trust || $cmd == models ]]; then
   sub=${positional[0]-}; positional=("${positional[@]:1}")
   case $cmd:$sub in
-    trust:check|trust:approve|trust:revoke|trust:show|trust:verify|trust:list|models:outdated|models:update) ;;
+    trust:check|trust:approve|trust:revoke|trust:show|trust:verify|trust:list|models:outdated|models:update|models:prune|models:share) ;;
     trust:*) die "say what to do: '$PROG trust check|approve|revoke|show|verify|list [MODEL]'" ;;
-    models:*) die "say what to do: '$PROG models outdated' or '$PROG models update MODEL'" ;;
+    models:*) die "say what to do: '$PROG models outdated', '$PROG models update MODEL', '$PROG models prune' or '$PROG models share [on|off]'" ;;
   esac
 fi
 [[ -n $cmd ]] || cmd=serve
@@ -662,7 +695,8 @@ if ((json)) && [[ ! $cmd =~ ^(ps|check|capacity|list|doctor|versions|trust|model
 [[ -n $opt_probes ]] && ((!opt_garak)) && die "--probes selects garak probes; add --garak"
 [[ -z $opt_probes || $opt_probes =~ ^[A-Za-z0-9_.,]+$ ]] || die "--probes takes garak probe names separated by commas"
 ((opt_project || opt_force)) && [[ $cmd != skills ]] && die "--project and --force only apply to '$PROG skills'"
-[[ -n $opt_output || -n $opt_sign ]] || ((opt_with_engines)) && [[ $cmd != export ]] && die "-o, --with-engines and --sign only apply to '$PROG export'"
+[[ -n $opt_sign ]] || ((opt_with_engines)) && [[ $cmd != export ]] && die "--with-engines and --sign only apply to '$PROG export'"
+[[ -n $opt_output && $cmd != export && $cmd != backup ]] && die "-o only applies to '$PROG export' and '$PROG backup'"
 [[ -n $opt_from && $cmd != install ]] && die "--from only applies to '$PROG install --from BUNDLE'"
 ((opt_sbom)) && [[ $cmd != versions ]] && die "--sbom only applies to '$PROG versions --sbom'"
 if ((${#opt_accept[@]})); then
@@ -717,9 +751,13 @@ declare -A CFG=(
   [SANDBOX]=auto              # auto: run engines in a bubblewrap sandbox when bwrap works here; on: required; off
   [GATEWAY_HOST]=127.0.0.1    # the gateway: one OpenAI-compatible address for every running model
   [GATEWAY_PORT]=8000
+  [GATEWAY_AUTOLOAD]=off      # on: a request for a checked menu model that is not running starts it
+  [GATEWAY_IDLE_STOP]=0       # minutes: the gateway stops a model that it started after this idle time; 0 = never
   [WEBUI]=ask                 # ask | on | off: setup offers (ask), installs (on) or skips (off) Open WebUI
   [WEBUI_HOST]=0.0.0.0        # Open WebUI: 0.0.0.0 = people on the network can use it (with accounts); 127.0.0.1 = this computer only
   [WEBUI_PORT]=3000
+  [WEBUI_TLS_CERT]=""         # HTTPS for Open WebUI: your certificate (PEM, with its chain) and its key; empty = HTTP
+  [WEBUI_TLS_KEY]=""
   [WEBUI_AUTH]=on             # on: accounts (the first is the admin, who adds people); off: only with WEBUI_HOST=127.0.0.1
   [WEBUI_RAG]=hybrid          # documents: hybrid (BM25 + vector search, then the reranker) | vector
   [WEBUI_RERANKER]=fast       # fast (small, on the CPU) | best (bge-reranker-v2-m3 on llama.cpp, GPU) | off
@@ -735,7 +773,7 @@ for _k in "${!CFG[@]}"; do DEFAULT_CFG[$_k]=${CFG[$_k]}; done; unset _k
 readonly CFG_ORDER=(ENGINES DEFAULT_ENGINE HOST PORT PORT_SPAN AUTH ALLOW_INSECURE CTX MAX_MODELS EVICT GPUS
   LLAMA_FLAGS VLLM_FLAGS OLLAMA_ATTACH OLLAMA_KEEP_ALIVE DRAFT_N NUMA TUNING VRAM_GUARD VRAM_RESERVE_MB VERIFY
   READY_TIMEOUT STOP_TIMEOUT LOG_LEVEL LOG_MAX_MB LLAMA_SOURCE VLLM_SOURCE OLLAMA_SOURCE LLAMA_BUILD AUTO_INSTALL
-  SECURITY ALLOW_PICKLE LOCK_MODELS SKILLS SCANNERS TRUST_SIGNERS SANDBOX GATEWAY_HOST GATEWAY_PORT WEBUI WEBUI_HOST WEBUI_PORT WEBUI_AUTH WEBUI_RAG WEBUI_RERANKER WEBUI_SEARCH WEBUI_SEARCH_PORT)
+  SECURITY ALLOW_PICKLE LOCK_MODELS SKILLS SCANNERS TRUST_SIGNERS SANDBOX GATEWAY_HOST GATEWAY_PORT GATEWAY_AUTOLOAD GATEWAY_IDLE_STOP WEBUI WEBUI_HOST WEBUI_PORT WEBUI_AUTH WEBUI_TLS_CERT WEBUI_TLS_KEY WEBUI_RAG WEBUI_RERANKER WEBUI_SEARCH WEBUI_SEARCH_PORT)
 readonly PATH_KEYS=(MODEL_STORE SYSFS PROCFS DEVFS OLLAMA_REGISTRY SYS_ENV_FILE
   HOME GITHUB GITHUB_API PYPI VLLM_ROCM_INDEX FLASHINFER_INDEX SECURITY_FLOOR SKILLS_MIRROR SANDBOX_RW)
 have_config=0
@@ -828,6 +866,9 @@ LLMSERVER_ALLOW_INSECURE=$(env_val "${CFG[ALLOW_INSECURE]}")
 # The gateway: one OpenAI-compatible address (http://HOST:PORT/v1) for every running model
 LLMSERVER_GATEWAY_HOST=$(env_val "${CFG[GATEWAY_HOST]}")
 LLMSERVER_GATEWAY_PORT=$(env_val "${CFG[GATEWAY_PORT]}")
+# on: a request for a checked menu model that is not running starts it; idle stop in minutes (0 = never)
+LLMSERVER_GATEWAY_AUTOLOAD=$(env_val "${CFG[GATEWAY_AUTOLOAD]}")
+LLMSERVER_GATEWAY_IDLE_STOP=$(env_val "${CFG[GATEWAY_IDLE_STOP]}")
 # Open WebUI: ask | on | off (offered, installed or skipped by setup)
 LLMSERVER_WEBUI=$(env_val "${CFG[WEBUI]}")
 # 0.0.0.0 = people on the network can use it (each with an account); 127.0.0.1 = this computer only
@@ -835,6 +876,9 @@ LLMSERVER_WEBUI_HOST=$(env_val "${CFG[WEBUI_HOST]}")
 LLMSERVER_WEBUI_PORT=$(env_val "${CFG[WEBUI_PORT]}")
 # on: accounts (the first one is the admin, who adds people or allows sign-ups); off: only on 127.0.0.1
 LLMSERVER_WEBUI_AUTH=$(env_val "${CFG[WEBUI_AUTH]}")
+# HTTPS: your certificate (PEM, with its chain) and its private key; empty = plain HTTP
+LLMSERVER_WEBUI_TLS_CERT=$(env_val "${CFG[WEBUI_TLS_CERT]}")
+LLMSERVER_WEBUI_TLS_KEY=$(env_val "${CFG[WEBUI_TLS_KEY]}")
 # documents: hybrid (keyword BM25 + vector search, merged, then reranked) | vector
 LLMSERVER_WEBUI_RAG=$(env_val "${CFG[WEBUI_RAG]}")
 # fast (small, CPU) | best (bge-reranker-v2-m3 on llama.cpp, GPU, many languages) | off
@@ -909,12 +953,18 @@ validate_config() {
   done
   ((CFG[GATEWAY_PORT] != CFG[WEBUI_PORT])) || die "LLMSERVER_GATEWAY_PORT and LLMSERVER_WEBUI_PORT must differ"
   ((CFG[WEBUI_SEARCH_PORT] != CFG[WEBUI_PORT] && CFG[WEBUI_SEARCH_PORT] != CFG[GATEWAY_PORT])) || die "LLMSERVER_WEBUI_SEARCH_PORT must differ from the gateway's and Open WebUI's ports"
+  [[ ${CFG[GATEWAY_AUTOLOAD]} =~ ^(on|off)$ ]] || die "LLMSERVER_GATEWAY_AUTOLOAD must be on or off"
+  [[ ${CFG[GATEWAY_IDLE_STOP]} =~ ^[0-9]+$ ]] || die "LLMSERVER_GATEWAY_IDLE_STOP must be a number of minutes (0 = never), got '${CFG[GATEWAY_IDLE_STOP]}'"
   [[ ${CFG[WEBUI_RAG]} =~ ^(hybrid|vector)$ ]] || die "LLMSERVER_WEBUI_RAG must be hybrid or vector"
   [[ ${CFG[WEBUI_RERANKER]} =~ ^(fast|best|off)$ ]] || die "LLMSERVER_WEBUI_RERANKER must be fast, best or off"
   [[ ${CFG[WEBUI_SEARCH]} =~ ^(on|off)$ ]] || die "LLMSERVER_WEBUI_SEARCH must be on or off"
   for e in GATEWAY_HOST WEBUI_HOST; do [[ ${CFG[$e]} =~ ^[A-Za-z0-9.:_-]+$ ]] || die "LLMSERVER_$e '${CFG[$e]}' is not a valid address"; done
   [[ ${CFG[WEBUI]} =~ ^(ask|on|off)$ ]] || die "LLMSERVER_WEBUI must be ask, on or off"
   [[ ${CFG[WEBUI_AUTH]} =~ ^(on|off)$ ]] || die "LLMSERVER_WEBUI_AUTH must be on or off"
+  if [[ -n ${CFG[WEBUI_TLS_CERT]}${CFG[WEBUI_TLS_KEY]} ]]; then
+    [[ -n ${CFG[WEBUI_TLS_CERT]} && -n ${CFG[WEBUI_TLS_KEY]} ]] || die "set both LLMSERVER_WEBUI_TLS_CERT and LLMSERVER_WEBUI_TLS_KEY, or neither"
+    for e in WEBUI_TLS_CERT WEBUI_TLS_KEY; do [[ ${CFG[$e]} == /* && -r ${CFG[$e]} ]] || die "LLMSERVER_$e must be the full path of a readable file, got '${CFG[$e]}'"; done
+  fi
   if [[ ${CFG[WEBUI_AUTH]} == off ]] && ! is_loopback "${CFG[WEBUI_HOST]}"; then
     die "LLMSERVER_WEBUI_AUTH=off is only allowed with LLMSERVER_WEBUI_HOST=127.0.0.1: on the network, everyone needs an account"
   fi
@@ -1675,7 +1725,13 @@ gh_latest() {  # owner/repo -> "tag" and its assets "name sha256" (from the rele
 cmd_upgrade() {  # [component] [--latest]
   local c=${1:-all} out tag name sha ok lines=() comps=() k
   pins_load
-  case $c in all) comps=(runtime llama ollama vllm) ;; llama.cpp) comps=(llama) ;; runtime|llama|ollama|vllm) comps=("$c") ;; *) die "unknown component '$c'" ;; esac
+  case $c in
+    all) comps=(runtime)   # what is installed now; 'upgrade' never installs a new component
+      for k in llama ollama vllm; do [[ $(engine_source "$k") == managed ]] && comp_meta "$k" && comps+=("$k"); done
+      compgen -G "$lhome/tools/open-webui/*/bin/open-webui" >/dev/null && comps+=(webui)
+      compgen -G "$lhome/tools/searxng/*/venv" >/dev/null && comps+=(searxng) ;;
+    llama.cpp) comps=(llama) ;; runtime|llama|ollama|vllm|webui|searxng) comps=("$c") ;; *) die "unknown component '$c': runtime, llama, ollama, vllm, webui or searxng" ;;
+  esac
   if ((opt_latest)); then
     install_runtime
     lhome_init
@@ -1691,6 +1747,7 @@ cmd_upgrade() {  # [component] [--latest]
           done <<<"$(tail -n +2 <<<"$out")"
           ((ok)) || die "the latest $repo release ($tag) publishes no SHA-256 digests for its Linux files, so it cannot be verified; staying on $(pin "$([[ $c == runtime ]] && echo uv || echo "$c")")"
           lines+=("$([[ $c == runtime ]] && echo uv || echo "$c")=$tag") ;;
+        webui|searxng) info "$c stays at the version this llmserver pins ($( [[ $c == webui ]] && pin webui || echo "${PIN[searxng]:0:12}")); a new llmserver release brings a new pin" ;;
         vllm)
           local py; py=$(helper_python)
           tag=$(curl -fsSL --proto '=https' --max-time 60 "$PYPI/pypi/vllm/json" | "$py" -I -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])') || die "could not ask PyPI for the latest vLLM"
@@ -1859,6 +1916,29 @@ parse_spec() {
   R_ENGINE=$e R_MODEL=$m R_SPEC=$e:$m
 }
 
+split_words() {  # string array-name: split on blanks; '...' and "..." keep blanks inside (no other escapes)
+  local -n _sw_out=$2
+  local _s=$1 _w="" _q="" _c _i _have=0
+  _sw_out=()
+  for ((_i = 0; _i < ${#_s}; _i++)); do
+    _c=${_s:_i:1}
+    if [[ -n $_q ]]; then if [[ $_c == "$_q" ]]; then _q=""; else _w+=$_c; fi
+    elif [[ $_c == "'" || $_c == '"' ]]; then _q=$_c _have=1
+    elif [[ $_c == [[:space:]] ]]; then ((_have)) && _sw_out+=("$_w"); _w="" _have=0
+    else _w+=$_c _have=1; fi
+  done
+  ((_have)) && _sw_out+=("$_w")
+  return 0   # an unclosed quote runs to the end of the line
+}
+join_words() {  # words -> one line that split_words reads back the same (quotes a word with blanks or quotes)
+  local w jw=()
+  for w; do
+    if [[ -z $w || $w =~ [[:space:]\'\"] ]]; then
+      if [[ $w == *\'* ]]; then jw+=("\"$w\""); else jw+=("'$w'"); fi
+    else jw+=("$w"); fi
+  done
+  local IFS=' '; printf '%s' "${jw[*]}"
+}
 specs=() extras=() spec_lines=() MENU_QUIET=0
 load_models() {
   local line spec rest n=0
@@ -2119,8 +2199,25 @@ legacy_cached() {  # engine model: files in the engine's cache, without a check 
   esac
 }
 declare -A STATE=() FIT=() WSIZE=()
+cache_prefetch() {  # check every menu record in one Python start -> CACHED_MEMO (only the ones that pass)
+  local i e m r args=() line rec res
+  local -A who=()
+  helper_python >/dev/null || return 0
+  for i in "${!specs[@]}"; do
+    e=${specs[i]%%:*} m=${specs[i]#*:}
+    [[ -v CACHED_MEMO[$e:$m] ]] && continue
+    r=$(trust_find "$e" "$m") || continue
+    who[$r]=$e:$m; args+=("$r" "$(trust_manifest "$e" "$m" || true)"); [[ -n ${args[-1]} ]] || args[-1]=-
+  done
+  ((${#args[@]})) || return 0
+  while IFS=$'\t' read -r rec res; do
+    [[ $res == ok && -v who[$rec] ]] && CACHED_MEMO[${who[$rec]}]=0
+  done < <(trustpy enforce-many "${args[@]}")
+  return 0
+}
 survey_models() {  # STATE[] (cache status) and FIT[] (how well each entry runs here)
   local i e m
+  cache_prefetch
   for i in "${!specs[@]}"; do
     e=${specs[i]%%:*} m=${specs[i]#*:}
     if ! engine_installed "$e"; then STATE[$i]="$e not installed"
@@ -2549,7 +2646,10 @@ def select(P, info, user_rc, local=False):
                     ', '.join(f['path'] for f in gg[:3]) + (', ...' if len(gg) > 3 else ''), P['repo'], ':' + next((q for q in ('Q4_K_M', 'Q5_K_M', 'Q8_0') if q in qs), qs[0]) if qs else ''))
             else:
                 finding(P, 'M-NO-WEIGHTS', 'no safetensors (or pickle) weights at the top level of the repository')
-        sel += [f for f in top if f['class'] == 'text' and not f['path'].lower().endswith('.md') and f['size'] < 200 << 20]
+        # configuration, tokenizer and template text: at the top, and in subfolders (for example 1_Pooling/ of an
+        # embedding model, or a processor folder); never code, weights or archives
+        sel += [f for f in files if f['class'] == 'text' and not f['path'].lower().endswith('.md')
+                and f['size'] < ((200 << 20) if '/' not in f['path'] else (20 << 20))]
         # remote code
         cfg = {}
         if not local and any(f['path'] == 'config.json' for f in top):
@@ -2763,7 +2863,7 @@ def cmd_post(planfile):
                 f['sha256'] = sha256_file(real); hashed += size
                 if P.get('source') != 'file':
                     finding(P, 'M-NO-HASH', 'no checksum came from Hugging Face; recorded the local SHA-256', path)
-            if P.get('source') == 'file': f['mtime'] = int(os.path.getmtime(real))
+            f['mtime'] = int(os.path.getmtime(real))   # a start compares size and time; a changed time is hashed again
         if not verify:
             finding(P, 'M-NO-HASH', 'hash check skipped (LLMSERVER_VERIFY=off)')
         here = [os.path.realpath(snap_path(P, p)) for p in P['selected'] if os.path.exists(snap_path(P, p))]
@@ -2814,8 +2914,13 @@ def cmd_record(planfile, out, status, who, version, rc_ok='0'):
 def files_of(R):
     return [f for f in R['files'] if f['path'] in set(R['selected'])]
 
+def same_content(f, real):
+    if f.get('sha256'): return sha256_file(real) == f['sha256']
+    if f.get('git_oid'): return git_oid(real, os.path.getsize(real)) == f['git_oid']
+    return False
+
 def cmd_enforce(recfile):
-    R = json.load(open(recfile))
+    R = json.load(open(recfile)); touched = False
     st = R.get('status')
     if st == 'revoked': print('fail\trevoked\tthe check record was revoked (llmserver trust approve SPEC to approve it again)'); return
     if LEVEL == 'strict' and st not in ('approved', 'imported'):
@@ -2835,9 +2940,34 @@ def cmd_enforce(recfile):
             print('fail\tmissing\t%s is missing%s' % (f['path'], '' if R.get('source') == 'file' else ' from the cache')); return
         if os.path.getsize(p) != f['size']:
             print('fail\tchanged\t%s changed size since it was checked' % f['path']); return
-        if R.get('source') == 'file' and f.get('mtime') and int(os.path.getmtime(p)) != f['mtime']:
-            print('fail\tchanged\t%s was modified since it was checked' % f['path']); return
+        if f.get('mtime') and int(os.path.getmtime(p)) != f['mtime']:
+            # the time changed (a copy, a restore, or a new content of the same size): hash it again
+            if not same_content(f, os.path.realpath(p)):
+                print('fail\tchanged\t%s was modified since it was checked' % f['path']); return
+            f['mtime'] = int(os.path.getmtime(p)); touched = True
+    if touched: save_to(recfile, R)
     print('ok\t%s\t%s' % (st, R.get('commit') or ''))
+
+def cmd_enforce_many(*pairs):
+    """record manifest ... -> one 'record<TAB>ok|fail' line each (one Python start for the whole menu)"""
+    import io, contextlib
+    for i in range(0, len(pairs) - 1, 2):
+        os.environ['T_MANIFEST'] = pairs[i + 1] if pairs[i + 1] != '-' else ''
+        b = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(b): cmd_enforce(pairs[i])
+        except Exception: b.write('fail')
+        print('%s\t%s' % (pairs[i], b.getvalue().split('\t', 1)[0].strip()))
+
+def cmd_keep_paths(*recs):
+    """records -> the snapshot links and the real files they use (what 'models prune' must keep)"""
+    for rf in recs:
+        try: R = json.load(open(rf))
+        except (OSError, ValueError): continue
+        if R.get('engine') == 'ollama' or R.get('source') == 'file': continue
+        for f in files_of(R):
+            p = snap_path(R, f['path'])
+            print(p); print(os.path.realpath(p))
 
 def cmd_verify(recfile, delete='0'):
     R = json.load(open(recfile)); bad = 0; n = 0
@@ -3464,6 +3594,9 @@ def cmd_bundle_place(dest, ollama_store, who):
                 os.makedirs(os.path.dirname(link), exist_ok=True)
                 if os.path.lexists(link): os.remove(link)
                 os.symlink(os.path.relpath(blob, os.path.dirname(link)), link)
+        for f in files_of(R) if m['engine'] != 'ollama' else []:   # the files were just placed: their time is new
+            q = snap_path(R, f['path'])
+            if os.path.exists(q): f['mtime'] = int(os.path.getmtime(q))
         R['imported'] = {'bundle': man['id'], 'at': now(), 'by': who, 'created_by': man.get('created_by'), 'status_at_export': R.get('status')}
         R['status'] = 'imported'
         os.makedirs(RECDIR, exist_ok=True)
@@ -3655,7 +3788,8 @@ def main(cmd, *a):
      'skill-record': cmd_skill_record, 'skill-verify': cmd_skill_verify, 'skill-fields': cmd_skill_fields, 'skill-relocate': cmd_skill_relocate,
      'skill-list': cmd_skill_list, 'hfcli-rewrite': cmd_hfcli_rewrite,
      'fields': cmd_fields, 'plan': cmd_plan, 'post': cmd_post, 'record': cmd_record, 'enforce': cmd_enforce, 'verify': cmd_verify,
-     'set': cmd_set, 'show': cmd_show, 'list': cmd_list, 'upstream': cmd_upstream}[cmd](*a)
+     'set': cmd_set, 'show': cmd_show, 'list': cmd_list, 'upstream': cmd_upstream,
+     'enforce-many': cmd_enforce_many, 'keep-paths': cmd_keep_paths}[cmd](*a)
 
 if __name__ == '__main__':
     try:
@@ -3815,6 +3949,9 @@ trust_gate() {  # engine model purpose(serve|download|approve|check|update) [use
     if [[ $TR_SOURCE == file ]]; then info "would check ${#TR_SEL[@]} local file(s) of $what and record the check"
     else info "would download ${#TR_SEL[@]} file(s) of $what at commit ${TR_COMMIT:0:12} and record the check"; fi
     rm -f -- "$plan"; T_COMMIT=$TR_COMMIT; return 0
+  fi
+  if [[ -n ${_LLMSERVER_NO_FETCH-} && ( $TR_SOURCE == hub || $e == ollama ) ]] && ! is_cached "$e" "$m"; then
+    rm -f -- "$plan"; trust_exit 4 "$what has not passed the security checks on this computer yet; start it one time yourself: '$PROG $what'"
   fi
   # ---- download exactly the selected files, at that commit ----
   base=$(trust_base "$e" "$m")
@@ -4274,6 +4411,9 @@ gpu_view() {
     else C_WARN+=("none of the GPUs this engine could use may be used here ($why), so it runs on the CPU"); fi
   fi
   pick=("${allowed[@]}")
+  for i in "${pick[@]}"; do
+    [[ ${G_PART[i]-} == MIG ]] && C_WARN+=("GPU $i (${G_NAME[i]}) has MIG enabled: llmserver counts the memory of the whole GPU, but $1 sees only the MIG instances, which have less. Check the fit of each model yourself")
+  done
   if ((${#pick[@]} == 0)); then V_KIND=cpu; return 0; fi
   rows=$(for i in "${pick[@]}"; do printf '%s\t%s\t%s\t%s\n' "${G_TOTAL[i]}" "$((G_TOTAL[i] - G_USED[i]))" "$i" "${G_NAME[i]}"; done | sort -t$'\t' -k1,1nr -s)
   while IFS=$'\t' read -r t f g n; do V_T+=("$t") V_F+=("$f") V_IDX+=("$g") V_N+=("$n") V_DESC+="${V_DESC:+, }$n"; done <<<"$rows"
@@ -4334,7 +4474,7 @@ numa_plan() {  # engine -> S_PREFIX (numactl or taskset), NUMA_NOTE, for the GPU
 # K+V over all attention layers), MI_LAYERS, MI_TCTX (trained context), MI_HEADS, MI_EXPERTS,
 # MI_SRC (local | remote | cache | none), MI_EST (1 = KV size estimated from the weight size)
 info_file=$state_dir/modelinfo
-MI_W=0 MI_KVEL=0 MI_LAYERS=0 MI_TCTX=0 MI_HEADS=0 MI_EXPERTS=0 MI_EUSED=0 MI_SRC=none MI_EST=0
+MI_W=0 MI_KVEL=0 MI_LAYERS=0 MI_TCTX=0 MI_HEADS=0 MI_EXPERTS=0 MI_EUSED=0 MI_SRC=none MI_EST=0 MI_ERR=""
 pyinfo() {  # helper for GGUF headers, safetensors configs and registry lookups, on llmserver's own Python
   local py
   py=$(helper_python) || { echo "err=no-python"; return 0; }
@@ -4474,13 +4614,9 @@ def main(cmd, *a):
                 want = None if a[1] == 'latest' else a[1].upper()
                 files = [(e['path'], int(e.get('size') or 0)) for e in tree if e.get('type') == 'file' and e.get('path', '').endswith('.gguf')]
                 main = [(p, sz) for p, sz in files if 'mmproj' not in p.lower() and (quant_of(p) or '').upper() == (want or 'Q4_K_M')]
-                if not main and want is None:   # no Q4_K_M: the smallest quant the repo has
-                    q = {}
-                    for p, sz in files:
-                        t = quant_of(p)
-                        if t and 'mmproj' not in p.lower(): q.setdefault(t, []).append((p, sz))
-                    if q: main = min(q.values(), key=lambda v: sum(sz for _, sz in v))
-                if not main: raise KeyError('no %s GGUF in %s' % (a[1], a[0]))
+                if not main:   # the same rule as the security check: no quant given means Q4_K_M
+                    have = sorted({quant_of(p) for p, _ in files if quant_of(p) and 'mmproj' not in p.lower()})
+                    raise ValueError('%s has no %s GGUF%s' % (a[0], want or 'Q4_K_M', ('; give one of: ' + ', '.join(have)) if have else ''))
                 main.sort()
                 first = main[0][0]
                 proj = [sz for p, sz in files if 'mmproj' in p.lower()]
@@ -4635,7 +4771,7 @@ mi_remote_args() {  # engine model -> pyinfo arguments for a registry lookup
 }
 model_info() {  # engine model [1 = never go online]
   local e=$1 m=$2 r="" files=() f snap manifest line args=()
-  MI_SRC=none MI_EST=0
+  MI_SRC=none MI_EST=0 MI_ERR=""
   if is_cached "$e" "$m" 2>/dev/null; then
     case $e in
       llama) while IFS= read -r -d '' f; do files+=("$f"); done < <(llama_files "$m")
@@ -4656,7 +4792,8 @@ model_info() {  # engine model [1 = never go online]
   [[ ${3-0} == 1 ]] && return 0
   mapfile -t args < <(mi_remote_args "$e" "$m")
   r=$(pyinfo "${args[@]}")
-  if mi_parse "$r"; then MI_SRC=remote; mi_store "$e:$m"; mi_fill "$e" "$m"; fi
+  if mi_parse "$r"; then MI_SRC=remote; mi_store "$e:$m"; mi_fill "$e" "$m"
+  elif [[ $r == err=ValueError:* ]]; then MI_ERR=${r#err=ValueError: }; fi
   return 0
 }
 mi_store() {
@@ -4735,7 +4872,7 @@ fit_core() {  # engine ctx: rate the model on the GPUs in V_* (V_F = the memory 
   local e=$1 want=$2 cap=0 total=0 ovh res=${CFG[VRAM_RESERVE_MB]} n kvmib need ctx tctx L per i ram
   F_RATING=unknown F_NEED=0 F_CAP=0 F_CTX=0 F_CTXFIT=0 F_FRAC=100 F_TP=1 F_UTIL="" F_NGL="" F_MSG="" F_SUGG=()
   ram=$((RAM_AVAIL > 0 ? RAM_AVAIL : RAM_TOTAL))
-  ((MI_W > 0)) || { F_MSG="it is not downloaded and its size could not be read online, so llmserver cannot yet check that it fits in memory"; return 0; }
+  ((MI_W > 0)) || { F_MSG=${MI_ERR:-"it is not downloaded and its size could not be read online, so llmserver cannot yet check that it fits in memory"}; return 0; }
   F_KVTOK=$(( $(kv_tok_bytes "$e") + DRAFT_KVEL * 2 ))   # the draft keeps its own 16-bit KV cache
   tctx=$MI_TCTX
   n=${#V_T[@]}
@@ -5082,11 +5219,11 @@ D_ENGINE="" D_MODEL="" D_SPEC="" D_N="" DRAFT_KVEL=0
 PORT_TOKEN=""   # port= in a menu entry: the port that model always gets
 resolve_draft() {  # ENGINE EXTRA -> D_*, PORT_TOKEN; strips draft= / draft-n= / port= from EXTRA. Status 1 + R_ERR on a bad draft
   local t ds="" dn="" toks=() keep=()
-  read -ra toks <<<"$EXTRA"
+  split_words "$EXTRA" toks
   for t in "${toks[@]}"; do
     case $t in draft=*) ds=${t#draft=} ;; draft-n=*) dn=${t#draft-n=} ;; port=*) PORT_TOKEN=${t#port=} ;; *) keep+=("$t") ;; esac
   done
-  EXTRA="${keep[*]}"
+  EXTRA=$(join_words "${keep[@]}")
   [[ -n ${opt_draft-} ]] && ds=$opt_draft
   [[ -n ${opt_draft_n-} ]] && dn=$opt_draft_n
   ((no_draft)) && ds=""
@@ -5148,7 +5285,7 @@ entry_prepare() {  # menu index -> ENGINE MODEL EXTRA FIT_FLAGS and draft sizes,
   local opt_draft="" opt_draft_n=""   # command-line drafts apply to the model being served, not the whole menu
   resolve_draft || rc=1
   draft_info 1
-  FIT_FLAGS=(); read -ra FIT_FLAGS <<<"$EXTRA"
+  FIT_FLAGS=(); split_words "$EXTRA" FIT_FLAGS
   return "$rc"
 }
 
@@ -5458,7 +5595,7 @@ json_usage() {  # "G:MiB,..." -> [{"gpu":G,"mib":M},...]
 json_rec() {  # ST -> running-model object
   local u gp=() kv cpu=null
   u=$(rec_usage)
-  if [[ ${ST[ENGINE]} == ollama ]] && ollama_load "$(hostport "$(connect_host "${ST[HOST]}")" "${ST[PORT]}")" && ((OL_SIZE > 0)); then
+  if [[ ${ST[ENGINE]} == ollama ]] && ollama_load "$(hostport "$(connect_host "${ST[HOST]}")" "${ST[PORT]}")" "${ST[LOG]-}" && ((OL_SIZE > 0)); then
     cpu=$((100 - OL_VRAM * 100 / OL_SIZE))
   fi
   IFS=',' read -ra kvs <<<"$u"
@@ -5580,9 +5717,9 @@ cmd_check() {  # [model]: hardware report, then advice for one model or every me
     echo "  security: $(trust_summary "$ENGINE" "$MODEL")"
     FIT_FLAGS=()
     case $ENGINE in
-      llama) read -ra FIT_FLAGS <<<"${CFG[LLAMA_FLAGS]} $EXTRA" ;;
-      vllm) read -ra FIT_FLAGS <<<"${CFG[VLLM_FLAGS]} $EXTRA" ;;
-      *) read -ra FIT_FLAGS <<<"$EXTRA" ;;
+      llama) split_words "${CFG[LLAMA_FLAGS]} $EXTRA" FIT_FLAGS ;;
+      vllm) split_words "${CFG[VLLM_FLAGS]} $EXTRA" FIT_FLAGS ;;
+      *) split_words "$EXTRA" FIT_FLAGS ;;
     esac
     FIT_FLAGS+=("${pass[@]}")
     engine_installed "$ENGINE" || warn "the $ENGINE engine is not installed; judging the hardware only"
@@ -5647,9 +5784,9 @@ check_json() {
     resolve_draft || die "$R_ERR"
     FIT_FLAGS=()
     case $ENGINE in
-      llama) read -ra FIT_FLAGS <<<"${CFG[LLAMA_FLAGS]} $EXTRA" ;;
-      vllm) read -ra FIT_FLAGS <<<"${CFG[VLLM_FLAGS]} $EXTRA" ;;
-      *) read -ra FIT_FLAGS <<<"$EXTRA" ;;
+      llama) split_words "${CFG[LLAMA_FLAGS]} $EXTRA" FIT_FLAGS ;;
+      vllm) split_words "${CFG[VLLM_FLAGS]} $EXTRA" FIT_FLAGS ;;
+      *) split_words "$EXTRA" FIT_FLAGS ;;
     esac
     FIT_FLAGS+=("${pass[@]}")
     draft_info; model_info "$ENGINE" "$MODEL"
@@ -5679,6 +5816,7 @@ check_json() {
 }
 mi_prefetch() {  # look up every menu entry that is neither cached nor known, in parallel
   local i e m todo=()
+  cache_prefetch
   for i in "${!specs[@]}"; do
     e=${specs[i]%%:*} m=${specs[i]#*:}
     if ! grep -qF "${specs[i]}"$'\t' "$info_file" 2>/dev/null && ! is_cached "$e" "$m" 2>/dev/null; then todo+=("$i"); fi
@@ -5732,10 +5870,15 @@ load_rec() {  # record file -> ST
   [[ -n ${ST[ENGINE]-} ]]
 }
 OL_SIZE=0 OL_VRAM=0 OL_CTX=0 PS_CPU=0
-ollama_load() {  # host:port -> OL_SIZE OL_VRAM (bytes) and OL_CTX of the loaded model; status 1 when none is loaded
-  local ps
+ollama_load() {  # host:port [log] -> OL_SIZE OL_VRAM (bytes) and OL_CTX of the loaded model; status 1 when none is loaded
+  # Ollama writes each request to its log, and the idle time comes from the log's time: give the log
+  # its old time back, so that looking at a model ('ps', 'capacity') does not count as using it
+  local ps t=""
   OL_SIZE=0 OL_VRAM=0 OL_CTX=0
-  ps=$(lcurl --max-time 3 "http://$1/api/ps" 2>/dev/null) || return 1
+  [[ -n ${2-} && -f $2 ]] && t=$(stat -c %Y -- "$2" 2>/dev/null)
+  ps=$(lcurl --max-time 3 "http://$1/api/ps" 2>/dev/null) || ps=""
+  [[ -n $t ]] && touch -m -d "@$t" -- "$2" 2>/dev/null
+  [[ -n $ps ]] || return 1
   ps=${ps//\": /\":}
   [[ $ps =~ \"size\":([0-9]+) ]] || return 1
   OL_SIZE=${BASH_REMATCH[1]}
@@ -6251,7 +6394,7 @@ cmd_ps() {  # [--json]
     load_rec "$f" || continue
     u=$(rec_usage); h=starting; [[ ${ST[STATE]:-ready} == ready ]] && rec_listening && h=listening
     is_pinned "${ST[SPEC]}" && h+=",pinned"; [[ ${ST[ADOPTED]:-0} == 1 ]] && h+=",adopted"; [[ -n ${ST[ROLE]-} ]] && h+=",${ST[ROLE]}"
-    if [[ ${ST[ENGINE]} == ollama ]] && ollama_load "$(hostport "$(connect_host "${ST[HOST]}")" "${ST[PORT]}")" && ((OL_SIZE > 0 && OL_VRAM < OL_SIZE)); then
+    if [[ ${ST[ENGINE]} == ollama ]] && ollama_load "$(hostport "$(connect_host "${ST[HOST]}")" "${ST[PORT]}")" "${ST[LOG]-}" && ((OL_SIZE > 0 && OL_VRAM < OL_SIZE)); then
       h+=",$((100 - OL_VRAM * 100 / OL_SIZE))%-on-cpu"; PS_CPU=1
     fi
     local shown; shown=$(spec_show "${ST[SPEC]}"); ((${#shown} > 44)) && shown=...${shown: -41}
@@ -6265,7 +6408,7 @@ cmd_ps() {  # [--json]
 ps_services() {  # the gateway and Open WebUI, when they run
   local out=()
   svc_alive gateway && out+=("gateway     $(gateway_url)  (pid ${ST[PID]}): one address for every running model")
-  svc_alive webui && out+=("Open WebUI  $(webui_urls | head -n 1)  (pid ${ST[PID]})")
+  svc_alive webui && out+=("Open WebUI  $(webui_urls "${ST[HOST]}" | head -n 1)  (pid ${ST[PID]})$([[ ${ST[FIRST]:-0} == 1 ]] && echo ': this computer only, until the admin account exists')")
   svc_alive searxng && out+=("SearXNG     http://127.0.0.1:${ST[PORT]}  (pid ${ST[PID]}): web search for Open WebUI")
   ((${#out[@]})) || return 0
   echo; echo "Services:"; printf '  %s\n' "${out[@]}"
@@ -6764,7 +6907,8 @@ MODEL is a menu number or \`llama:ORG/REPO-GGUF:QUANT\`, \`vllm:ORG/REPO\`, \`ol
 
 ## Never do without an explicit request
 
-- \`llmserver uninstall\`, \`llmserver doctor --fix\`, \`llmserver trust revoke\`, \`llmserver models update\`, \`llmserver model rm --purge\`, \`llmserver model purge\`, \`llmserver key new\`, \`llmserver autostart on|off\`.
+- \`llmserver uninstall\`, \`llmserver doctor --fix\`, \`llmserver trust revoke\`, \`llmserver models update\`, \`llmserver models prune\`, \`llmserver model rm --purge\`, \`llmserver model purge\`, \`llmserver key new\`, \`llmserver restore\`, \`llmserver autostart on|off\`, \`llmserver models share on|off\` (it changes the user's login files).
+- Never read, print or send a backup file (\`llmserver backup\`): it holds the API key and secrets.
 - Install another hf CLI. The Hugging Face CLI is \`llmserver hf ...\`.
 - Edit \`/etc/llmserver_env\` or files under \`~/.llmserver\` directly; use the \`model\` and \`config\` commands, which check what they write.
 EOF3
@@ -7105,7 +7249,7 @@ cmd_trust() {  # check | approve | revoke | show | verify | list
   if [[ -n $sel ]]; then
     choose "$sel" || die "$R_ERR"
     FIT_FLAGS=()
-    case $ENGINE in llama) read -ra FIT_FLAGS <<<"${CFG[LLAMA_FLAGS]} $EXTRA" ;; vllm) read -ra FIT_FLAGS <<<"${CFG[VLLM_FLAGS]} $EXTRA" ;; esac
+    case $ENGINE in llama) split_words "${CFG[LLAMA_FLAGS]} $EXTRA" FIT_FLAGS ;; vllm) split_words "${CFG[VLLM_FLAGS]} $EXTRA" FIT_FLAGS ;; esac
     FIT_FLAGS+=("${pass[@]}")
     user_wants_rc && urc=1
   elif [[ $sub != verify ]]; then die "say which model: '$PROG trust $sub MODEL' (a menu number or a spec)"; fi
@@ -7128,6 +7272,7 @@ cmd_trust() {  # check | approve | revoke | show | verify | list
     approve)
       trust_gate "$ENGINE" "$MODEL" approve "$urc"
       info "${C_B}approved${C_0}: $SPEC at commit ${T_COMMIT:0:12}$( ((T_RCOK)) && echo ', including its own code' || true)"
+      gateway_menu_refresh
       running_scan
       if f=$(rec_find "$SPEC"); then info "$SPEC is running; '$PROG $SPEC --restart' serves the approved commit"; fi
       return 0 ;;
@@ -7293,7 +7438,7 @@ cmd_model() {  # list | add SPEC [FLAGS] | rm [N|SPEC...] [--purge] | edit
       if ((rc == 1)); then die "not added: $ME_MSG"
       elif ((rc == 2)); then warn "could not check that $m exists ($ME_MSG); adding it anyway"; fi
       if [[ ! -e $models_file ]]; then mkdir -p "${models_file%/*}"; echo "# llmserver menu: one '[engine:]model [extra engine flags]' per line" > "$models_file"; fi
-      w="$spec${model_args[1]:+ ${model_args[*]:1}}${pass[*]:+ ${pass[*]}}"
+      w="$spec${model_args[1]:+ $(join_words "${model_args[@]:1}")}${pass[0]:+ $(join_words "${pass[@]}")}"
       printf '%s\n' "$w" >> "$models_file"
       info "added $w to the menu as entry $((${#specs[@]} + 1))" ;;
     rm|remove)
@@ -7347,11 +7492,179 @@ cmd_model() {  # list | add SPEC [FLAGS] | rm [N|SPEC...] [--purge] | edit
       ((${#specs[@]})) || { info "the menu is empty. '$PROG model add [engine:]owner/model' adds one"; return 0; }
       echo "$PROG: the menu ($models_file):" >&2; menu_show ;;
   esac
+  [[ $sub == list || -z $sub ]] || gateway_menu_refresh
   return 0
 }
-cmd_models() {  # outdated | update MODEL
+models_prune() {  # delete the files of older commits that llmserver downloaded (a newer check record replaced them)
+  local f b e m p recs=() old=() paths=() bytes=0
+  local -A pkeep=() newest=()
+  helper_python >/dev/null || die "this needs llmserver's runtime: '$PROG install runtime'"
+  running_scan
+  while IFS= read -r f; do [[ -n $f ]] && { b=${f##*/}; newest[${b%@*}]=$f; recs+=("$f"); }; done < <(trust_latest)
+  for f in "${R_FILES[@]}"; do   # a running model keeps the files of its commit, even an older one
+    load_rec "$f" || continue
+    [[ -n ${ST[TRUST_RECORD]-} && -f $trust_rec_dir/${ST[TRUST_RECORD]} ]] && recs+=("$trust_rec_dir/${ST[TRUST_RECORD]}")
+  done
+  ((${#recs[@]})) || { info "no check records: nothing to prune"; return 0; }
+  while IFS= read -r p; do pkeep[$p]=1; done < <(trustpy keep-paths "${recs[@]}")
+  if [[ -r $downloads_file ]]; then
+    while IFS=$'\t' read -r e m p; do
+      [[ $p == /*/models--*/* && $p != *..* && ( -e $p || -L $p ) && ! -v pkeep[$p] ]] || continue
+      [[ " ${paths[*]} " == *" $p "* ]] && continue
+      paths+=("$p"); [[ -f $p && ! -L $p ]] && bytes=$((bytes + $(stat -c %s -- "$p")))
+    done < "$downloads_file"
+  fi
+  for f in "$trust_rec_dir"/*.json; do   # older records of the same model, not in use
+    [[ -f $f ]] || continue
+    b=${f##*/}; b=${b%@*}
+    [[ ${newest[$b]-} == "$f" || " ${recs[*]} " == *" $f "* ]] || old+=("$f")
+  done
+  if ((${#paths[@]} + ${#old[@]} == 0)); then info "nothing to prune: every downloaded file belongs to a current commit"; return 0; fi
+  info "older commits: ${#paths[@]} file(s) and link(s), $(hsize "$bytes"); ${#old[@]} older check record(s)"
+  ((dry)) && { printf '  %s\n' "${paths[@]}" >&2; return 0; }
+  if ((!yes)); then
+    [[ -t 0 && -t 2 ]] || die "this deletes files; add --yes to do it without a question"
+    printf 'Delete them? Files that a current commit also uses are kept. [y/N]: ' >&2
+    IFS= read -r REPLY || REPLY=""; [[ ${REPLY,,} == y* ]] || { info "nothing was deleted"; return 0; }
+  fi
+  U_NOTES=() U_FAILS=0
+  ((${#paths[@]})) && u_purge_hub "${paths[@]}"
+  for p in "${U_NOTES[@]}"; do note "$p"; done
+  rm -f -- "${old[@]}"
+  if [[ -r $downloads_file ]]; then   # forget what is gone
+    while IFS=$'\t' read -r e m p; do [[ $p == - || -e $p || -L $p ]] && printf '%s\t%s\t%s\n' "$e" "$m" "$p"; done < "$downloads_file" > "$downloads_file.tmp.$$"
+    mv -f -- "$downloads_file.tmp.$$" "$downloads_file"
+  fi
+  log_write info "models prune: ${#paths[@]} file(s), ${#old[@]} record(s)"
+  info "pruned the older commits ($(hsize "$bytes"))"
+}
+# ---- 'models share': other tools use the private model store --------------------------
+# Two exports in a marked block of your login files, nothing else: no links, and no file in
+# the llmserver home that a login shell runs. Each line applies only while its folder exists,
+# so the block is harmless after an uninstall.
+readonly SHARE_BEGIN='# >>> llmserver models share >>>' SHARE_END='# <<< llmserver models share <<<'
+share_targets() {  # login files that get the block: ~/.profile, bash's own login file, ~/.zshenv for zsh
+  local f
+  printf '%s\n' "$HOME/.profile"
+  for f in "$HOME/.bash_profile" "$HOME/.bash_login"; do   # bash reads the first; skip it when it reads ~/.profile
+    [[ -e $f ]] || continue
+    grep -qE '^[[:space:]]*(\.|source)[[:space:]]+("?(~|\$HOME|\$\{HOME\})/)?\.profile"?([[:space:];]|$)' "$f" 2>/dev/null || printf '%s\n' "$f"
+    break
+  done
+  if [[ -e $HOME/.zshenv ]] || [[ $(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7) == */zsh ]]; then printf '%s\n' "$HOME/.zshenv"; fi
+}
+share_found() {  # login files that hold the block now
+  local f
+  for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.zshenv"; do
+    [[ -f $f ]] && grep -qxF "$SHARE_BEGIN" "$f" 2>/dev/null && printf '%s\n' "$f"
+  done
+  return 0
+}
+share_vars() {  # file -> NAME<TAB>path for each export in its block
+  awk -v b="$SHARE_BEGIN" -v e="$SHARE_END" '$0 == b {s = 1; next} $0 == e {s = 0} s' "$1" 2>/dev/null |
+    sed -nE "s/.*export ([A-Z_]+)='([^']*)'.*/\1\t\2/p"
+}
+share_edit() {  # file [block]: put the block in the file (in place of an old one), or take it out
+  local t tmp
+  t=$(readlink -f -- "$1" 2>/dev/null) || t=$1   # write through a link (dotfile managers)
+  [[ -f $t || -n ${2-} ]] || return 0
+  tmp=$(mktemp "${t%/*}/.llmserver-share.XXXXXX") || return 1
+  # an unfinished block (no end line) is kept as it is: never drop lines that may not be ours
+  if ! { if [[ -f $t ]]; then
+           awk -v b="$SHARE_BEGIN" -v e="$SHARE_END" '$0 == b {if (s) printf "%s", buf; s = 1; buf = $0 ORS; next}
+             s {buf = buf $0 ORS; if ($0 == e) {s = 0; buf = ""}; next} {print} END {if (s) printf "%s", buf}' "$t"
+         fi
+         [[ -z ${2-} ]] || printf '%s\n' "$2"; } > "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if [[ -f $t ]] && cmp -s -- "$t" "$tmp"; then rm -f -- "$tmp"; return 0; fi
+  if [[ -f $t ]]; then chmod --reference="$t" -- "$tmp"; else chmod 644 -- "$tmp"; fi
+  mv -f -- "$tmp" "$t" && SHARE_CHANGED+=("$1")
+}
+share_off() {  # take the block out of every login file; status 1 if one could not be changed
+  local f rc=0
+  SHARE_CHANGED=()
+  while IFS= read -r f; do
+    [[ -n $f ]] || continue
+    if ((dry)); then SHARE_CHANGED+=("$f"); else share_edit "$f" || { warn "could not change $f"; rc=1; }; fi
+  done < <(share_found)
+  return "$rc"
+}
+models_share() {  # status | on | off
+  local what=${1:-status} store f n v block="" lines=() files=() vars=() items=()
+  local mhub=$lhome/models/huggingface/hub mol=$lhome/models/ollama
+  store=$(setting LLMSERVER_MODEL_STORE shared)
+  case $what in
+    status)
+      mapfile -t files < <(share_found)
+      for f in "${files[@]}"; do while IFS=$'\t' read -r n v; do [[ -n $n ]] && vars+=("$n=$v"); done < <(share_vars "$f"); done
+      mapfile -t vars < <(printf '%s\n' "${vars[@]}" | awk 'NF && !seen[$0]++')
+      if ((json)); then
+        jo store "$(js "$store")" shared "$( ((${#files[@]})) && echo true || echo false)" files "$(jsa "${files[@]}")" \
+          variables "$(jsa "${vars[@]}")" hf_hub_cache "$(js "$hub")" ollama_models "$(js "${OLLAMA_MODELS:-$HOME/.ollama/models}")"; echo
+        return 0
+      fi
+      echo "Model store: $store"
+      echo "  Hugging Face: $hub"
+      echo "  Ollama:       ${OLLAMA_MODELS:-$HOME/.ollama/models}"
+      if ((${#files[@]} == 0)); then
+        if [[ $store == shared ]]; then echo "Other tools use the same standard caches. Nothing to share."
+        else echo "Shared with other tools: no. '$PROG models share on' shares the model files."; fi
+        return 0
+      fi
+      echo "Shared with other tools: yes, by ${files[*]/#$HOME/\~}"
+      printf '  %s\n' "${vars[@]}"
+      for v in "${vars[@]}"; do
+        case $v in
+          HF_HUB_CACHE=*) [[ ${v#*=} == "$mhub" ]] || warn "HF_HUB_CACHE in the block is not this home's store ($mhub); run '$PROG models share on' again" ;;
+          OLLAMA_MODELS=*) [[ ${v#*=} == "$mol" ]] || warn "OLLAMA_MODELS in the block is not this home's store ($mol); run '$PROG models share on' again" ;;
+        esac
+      done
+      [[ $store == shared ]] && warn "LLMSERVER_MODEL_STORE is shared, but the block points every tool, llmserver too, at the home's store; '$PROG models share off' removes it"
+      if { [[ " ${vars[*]} " == *" HF_HUB_CACHE="* ]] && ((!USER_HF_SET)); } || { [[ " ${vars[*]} " == *" OLLAMA_MODELS="* ]] && ((!USER_OLLAMA_SET)); }; then
+        info "this shell does not have the variables yet: log in again, or run '. ~/.profile'"
+      fi
+      return 0 ;;
+    off)
+      share_off || die "the block could not be removed from every file; see the warnings"
+      if ((${#SHARE_CHANGED[@]} == 0)); then info "the model files were not shared: nothing to remove"; return 0; fi
+      if ((dry)); then info "would remove the model-sharing lines from: ${SHARE_CHANGED[*]}"; return 0; fi
+      log_write info "models share off: ${SHARE_CHANGED[*]}"
+      info "removed the model-sharing lines from: ${SHARE_CHANGED[*]}"
+      info "new logins use the standard caches again; the model files stay in $lhome/models" ;;
+    on)
+      [[ $store == private ]] || die "LLMSERVER_MODEL_STORE is shared: llmserver already uses the standard caches, as other tools do. To keep the model files in $lhome/models, run '$PROG config set model_store private' first"
+      [[ $lhome != *"'"* ]] || die "the llmserver home path contains a quote ('); it cannot be written safely into a login file"
+      if ((USER_HF_SET)) && [[ $hub != "$mhub" ]]; then info "HF_HUB_CACHE or HF_HOME is already set by you: llmserver and other tools use $hub; not changed"
+      else lines+=("if [ -d '$mhub' ]; then export HF_HUB_CACHE='$mhub'; fi"); fi
+      if ((USER_OLLAMA_SET)) && [[ $OLLAMA_MODELS != "$mol" ]]; then info "OLLAMA_MODELS is already set by you: llmserver and other tools use $OLLAMA_MODELS; not changed"
+      else lines+=("if [ -d '$mol' ]; then export OLLAMA_MODELS='$mol'; fi"); fi
+      ((${#lines[@]})) || { info "nothing to share"; return 0; }
+      block=$(printf '%s\n' "$SHARE_BEGIN" "# Other tools use llmserver's model files. '$PROG models share off' removes this block." "${lines[@]}" "$SHARE_END")
+      mapfile -t files < <(share_targets)
+      if ((dry)); then
+        info "would write these lines into: ${files[*]}"; printf '%s\n' "$block" >&2; return 0
+      fi
+      mkdir -p -- "$mhub" "$mol"; chmod 700 -- "$lhome/models" 2>/dev/null || true
+      SHARE_CHANGED=()
+      for f in "${files[@]}"; do share_edit "$f" "$block" || die "could not write $f"; done
+      local written=("${SHARE_CHANGED[@]}"); SHARE_CHANGED=()
+      for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.zshenv"; do   # a login file not chosen this time
+        [[ " ${files[*]} " == *" $f "* ]] || { [[ -f $f ]] && grep -qxF "$SHARE_BEGIN" "$f" && share_edit "$f"; } || true
+      done
+      ((${#SHARE_CHANGED[@]})) && info "removed the old model-sharing lines from: ${SHARE_CHANGED[*]} (it reads ~/.profile)"
+      log_write info "models share on: ${files[*]}"
+      if ((${#written[@]})); then info "wrote the model-sharing lines into: ${written[*]}"
+      else info "the model-sharing lines were already in place"; fi
+      printf '  %s\n' "${lines[@]}" | sed -nE "s/.*export ([A-Z_]+)='([^']*)'.*/\1=\2/p" >&2
+      info "they apply to new logins. In this shell, run: . ~/.profile"
+      info "a systemd service (for example ollama.service) does not read them: give it Environment=OLLAMA_MODELS=$mol in an override ('systemctl edit')" ;;
+    *) die "say what to do: '$PROG models share', '$PROG models share on' or '$PROG models share off'" ;;
+  esac
+}
+cmd_models() {  # outdated | update MODEL | prune | share [on|off]
   local f out k a b moved=0 items=() changed
   case $sub in
+    prune) models_prune; return 0 ;;
+    share) models_share "${positional[0]-status}"; return 0 ;;
     outdated)
       runtime_ready || die "the check needs llmserver's runtime: '$PROG install runtime'"
       while IFS= read -r f; do
@@ -7377,7 +7690,7 @@ cmd_models() {  # outdated | update MODEL
       choose "$sel" || die "$R_ERR"
       [[ $MODEL != *@* ]] || die "$SPEC is locked to a commit; change the menu entry (or pass the spec without @commit) to update it"
       FIT_FLAGS=()
-      case $ENGINE in llama) read -ra FIT_FLAGS <<<"${CFG[LLAMA_FLAGS]} $EXTRA" ;; vllm) read -ra FIT_FLAGS <<<"${CFG[VLLM_FLAGS]} $EXTRA" ;; esac
+      case $ENGINE in llama) split_words "${CFG[LLAMA_FLAGS]} $EXTRA" FIT_FLAGS ;; vllm) split_words "${CFG[VLLM_FLAGS]} $EXTRA" FIT_FLAGS ;; esac
       FIT_FLAGS+=("${pass[@]}")
       trust_gate "$ENGINE" "$MODEL" update "$(user_wants_rc && echo 1 || echo 0)"
       info "updated $SPEC to commit ${T_COMMIT:0:12}; a running copy keeps its commit until '$PROG $SPEC --restart'" ;;
@@ -7467,15 +7780,36 @@ doctor_components() {  # findings about LLMSERVER_HOME, the runtime and the mana
 # files, a held lock, missing tools, settings problems and servers llmserver did not start.
 D_LEVEL=() D_CHECK=() D_MSG=()
 dfind() { D_LEVEL+=("$1") D_CHECK+=("$2") D_MSG+=("$3"); }   # level (ok|info|warn|problem|fixed) check message
+doctor_share() {  # the 'models share' block: still pointing at this home, and only with a private store
+  local f n v files=()
+  mapfile -t files < <(share_found)
+  ((${#files[@]})) || return 0
+  [[ $(setting LLMSERVER_MODEL_STORE shared) == private ]] ||
+    dfind warn models "LLMSERVER_MODEL_STORE is shared, but ${files[*]} point other tools and llmserver at $lhome/models; '$PROG models share off' removes the lines"
+  for f in "${files[@]}"; do
+    while IFS=$'\t' read -r n v; do
+      [[ -n $n && $v != "$lhome/models/"* ]] && dfind warn models "$f exports $n=$v, which is not in this llmserver home; run '$PROG models share on' again"
+    done < <(share_vars "$f")
+  done
+  dfind ok models "the model files are shared with other tools through ${files[*]}"
+}
 cmd_doctor() {
   local f d x pid spec port run owner p t known=" " problems=0 i
   have curl || dfind problem tools "curl is missing, so no model can be started"
   have flock || dfind warn tools "flock is missing: starts and stops are not serialised, so two at once can collide"
   have setsid || dfind warn tools "setsid is missing: a server's helper processes may outlive it when it is stopped"
   have ss || have lsof || dfind warn tools "neither ss nor lsof is installed, so the holder of a busy port cannot be named"
+  local sha; sha=$(sha256sum -- "$SELF" 2>/dev/null); sha=${sha%% *}
+  dfind info script "$PROG $VERSION at $SELF, SHA-256 ${sha:-unknown}; compare it with the SHA256SUMS file of the release"
+  if [[ ${CFG[AUTH]} != key ]] && have getent; then   # other people on this computer reach 127.0.0.1 too
+    local others
+    others=$(getent passwd | awk -F: -v me="$(id -u)" '$3 >= 1000 && $3 < 60000 && $3 != me && $7 !~ /(nologin|false|sync)$/ {n++} END {print n + 0}')
+    ((others > 0)) && dfind warn auth "$others other account(s) can log in to this computer, and models on 127.0.0.1 (and the gateway) need no key from them. To require the key everywhere: '$PROG config set auth key', then start the models again with --restart"
+  fi
   doctor_components
   doctor_trust
   doctor_skills
+  doctor_share
   for x in "${ENV_WARNINGS[@]}"; do dfind warn settings "$x"; done
   container_probe
   [[ -n $CT_DESC ]] && dfind info container "$CT_DESC"
@@ -7717,12 +8051,24 @@ S_ARGV=() S_ENV=() S_PID="" S_LOG="" USER_FLAGS=() AUTO_FLAGS=() ENG_UNSET=()
 # cloud credentials, tokens and other files in the home cannot be read by a model's code, and
 # nothing outside those folders can be written. GPUs stay reachable through /dev, and the network
 # stays shared, because the server must listen on its port.
-SANDBOX_ARGV=() SANDBOX_NOTE="" SANDBOX_KIND="" SANDBOX_WORKS=""
+SANDBOX_ARGV=() SANDBOX_NOTE="" SANDBOX_KIND="" SANDBOX_WORKS="" SB_BASE=()
 sandbox_works() {  # is bubblewrap usable here (installed, and user namespaces allowed)?
   if [[ -z $SANDBOX_WORKS ]]; then
-    if have bwrap && bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs "$HOME" -- /bin/true >/dev/null 2>&1; then SANDBOX_WORKS=1; else SANDBOX_WORKS=0; fi
+    if have bwrap && bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc --tmpfs "$HOME" -- /bin/true >/dev/null 2>&1; then SANDBOX_WORKS=1; else SANDBOX_WORKS=0; fi
   fi
   ((SANDBOX_WORKS))
+}
+sandbox_base() {  # /dev binding words -> SB_BASE: what every sandbox shares
+  # --unshare-pid: the sandbox sees only its own processes, so /proc/PID/root and /proc/PID/environ of
+  # your other programs (your shell, your agent) cannot reach your files or secrets.
+  # /run/user/UID holds the sockets of your session (D-Bus, systemd, the SSH agent, the keyring):
+  # a read-only bind does not stop a connection to a socket, so the folder is replaced by an empty one.
+  local run; run=/run/user/$(id -u)
+  SB_BASE=("$(command -v bwrap)" --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --ro-bind / / "$@" --proc /proc
+    --tmpfs /tmp --tmpfs /var/tmp --tmpfs "$HOME" --tmpfs "$lhome")
+  [[ -d $run ]] && SB_BASE+=(--tmpfs "$run")
+  [[ -n ${XDG_RUNTIME_DIR-} && -d $XDG_RUNTIME_DIR && $XDG_RUNTIME_DIR != "$run" && $XDG_RUNTIME_DIR != /tmp* && $XDG_RUNTIME_DIR != "$HOME"* ]] && SB_BASE+=(--tmpfs "$XDG_RUNTIME_DIR")
+  return 0
 }
 sandbox_plan() {  # engine -> SANDBOX_ARGV (empty when not sandboxed), SANDBOX_NOTE, SANDBOX_KIND
   local e=$1 cache d bin root store
@@ -7739,9 +8085,8 @@ sandbox_plan() {  # engine -> SANDBOX_ARGV (empty when not sandboxed), SANDBOX_N
   fi
   cache=$state_dir/sandbox/$e
   (umask 077; mkdir -p "$cache")
-  SANDBOX_ARGV=(bwrap --unshare-ipc --unshare-uts --unshare-cgroup-try
-    --ro-bind / / --dev-bind /dev /dev --proc /proc --tmpfs /tmp --tmpfs /var/tmp
-    --tmpfs "$HOME" --tmpfs "$lhome" --bind "$cache" "$HOME/.cache"
+  sandbox_base --dev-bind /dev /dev
+  SANDBOX_ARGV=("${SB_BASE[@]}" --bind "$cache" "$HOME/.cache"
     --ro-bind-try "$lhome/engines" "$lhome/engines" --ro-bind-try "$lhome/python" "$lhome/python")   # the software only: never the settings, key, logs or records
   [[ -d $hub ]] && SANDBOX_ARGV+=(--ro-bind "$hub" "$hub")
   for d in "${MODEL-}" "${D_PATH-}"; do   # GGUF files on this computer: their folder, read-only
@@ -7769,7 +8114,7 @@ sandbox_plan() {  # engine -> SANDBOX_ARGV (empty when not sandboxed), SANDBOX_N
   done
   SANDBOX_ARGV+=(--)
   SANDBOX_KIND=bwrap
-  SANDBOX_NOTE="sandbox: bubblewrap (read-only system, empty home, no llmserver settings or key, model files read-only)"
+  SANDBOX_NOTE="sandbox: bubblewrap (read-only system, empty home, own processes only, no session sockets, no llmserver settings or key, model files read-only)"
 }
 model_role() {  # -> rerank or embedding when the engine flags make this model a reranker or an embedding server (not for chat)
   local t
@@ -7779,11 +8124,11 @@ model_role() {  # -> rerank or embedding when the engine flags make this model a
 }
 build_command() {  # ENGINE MODEL HOST PORT CTX EXTRA pass[] and the checked record (T_*) -> S_ARGV S_ENV USER_FLAGS
   local t extra_arr=() cfg_arr=()
-  read -ra extra_arr <<<"$EXTRA"
+  split_words "$EXTRA" extra_arr
   S_ARGV=() S_ENV=() USER_FLAGS=()
   case $ENGINE in
     llama)
-      read -ra cfg_arr <<<"${CFG[LLAMA_FLAGS]}"
+      split_words "${CFG[LLAMA_FLAGS]}" cfg_arr
       USER_FLAGS=("${cfg_arr[@]}" "${extra_arr[@]}" "${pass[@]}")
       # the checked files, by path: llama.cpp never downloads anything itself
       for t in "${USER_FLAGS[@]}"; do
@@ -7800,7 +8145,7 @@ build_command() {  # ENGINE MODEL HOST PORT CTX EXTRA pass[] and the checked rec
       [[ $CTX != auto ]] && S_ARGV+=(-c "$CTX")
       S_ARGV+=("${AUTO_FLAGS[@]}" "${USER_FLAGS[@]}") ;;
     vllm)
-      read -ra cfg_arr <<<"${CFG[VLLM_FLAGS]}"
+      split_words "${CFG[VLLM_FLAGS]}" cfg_arr
       USER_FLAGS=("${cfg_arr[@]}" "${extra_arr[@]}" "${pass[@]}")
       S_ARGV=("$VLLM_BIN" serve "${MODEL%%@*}" --host "$HOST" --port "$PORT" --served-model-name "$MODEL")
       # the checked commit, served offline: vLLM cannot fetch files or code that were not checked
@@ -7870,11 +8215,21 @@ preflight_flags() {  # catch a mistyped llama.cpp flag before anything is stoppe
   done
   ((${#bad[@]} == 0)) || die "llama.cpp does not list these flags in its --help: ${bad[*]}. Nothing was stopped. Fix the flag, or pass --no-preflight if this build really accepts it"
 }
+# The engines get a clean environment: only the variables in this list, and the variables you put in
+# llmserver.env. Credentials in your shell (cloud keys, tokens, SSH_AUTH_SOCK) do not reach model code.
+readonly ENGINE_ENV_RE='^(PATH|HOME|USER|LOGNAME|LANG|LANGUAGE|TZ|TERM|TMPDIR|LD_LIBRARY_PATH|XDG_CACHE_HOME|LC_[A-Z_]+|(CUDA|NVIDIA|NCCL|CUBLAS|CUDNN|HIP|ROCR|ROCM|HSA|HCC|GPU|AMD|MIOPEN|VK|MESA|GGML|LLAMA|VLLM|OLLAMA|OMP|MKL|OPENBLAS|TORCH|PYTORCH|TRITON|TOKENIZERS|TRANSFORMERS)_[A-Z0-9_]*|HF_HOME|HF_HUB_CACHE|HF_HUB_OFFLINE|HF_ENDPOINT|LLMSERVER_SERVED_[A-Z]+)$'
+env_clean() {  # in a subshell: remove every exported variable that is not in ENGINE_ENV_RE or the settings file
+  local v
+  for v in $(compgen -e); do
+    [[ $v =~ $ENGINE_ENV_RE || -v ENVF[$v] ]] || unset "$v" 2>/dev/null || true
+  done
+}
 start_server() {  # launch S_ARGV in the background, in its own session, so the whole process
   # group can be stopped later; it keeps running after llmserver exits
   local kv launcher=()
   have setsid && launcher=(setsid)
   (
+    env_clean
     for kv in "${VIS_UNSET[@]}" "${ENG_UNSET[@]}"; do unset "$kv"; done
     # shellcheck disable=SC2163  # kv holds NAME=value
     for kv in "${S_ENV[@]}" "${SECRET_ENV[@]}"; do export "$kv"; done
@@ -8259,12 +8614,14 @@ run_uninstall() {
   local skill_recs=() hf_link=""
   mapfile -t skill_recs < <(compgen -G "$skill_rec_dir/*.json" || true)
   p=$(hf_link_path); grep -qF "$HF_LINK_MARK" "$p" 2>/dev/null && hf_link=$p
+  local share_files=(); mapfile -t share_files < <(share_found)
 
   echo "$PROG uninstall will:" >&2
   for p in "${servers[@]}"; do echo "  - $p" >&2; done
   for p in "${units[@]}"; do echo "  - disable and delete the systemd user service $p${instances[*]:+ (instances: ${instances[*]})}" >&2; done
   ((${#skill_recs[@]})) && echo "  - remove the ${#skill_recs[@]} agent skill(s) llmserver installed and their links, if they are unchanged (changed ones are kept)" >&2
   [[ -n $hf_link ]] && echo "  - delete the hf link $hf_link" >&2
+  ((${#share_files[@]})) && echo "  - remove the model-sharing lines ('models share') from ${share_files[*]}" >&2
   echo "  - delete $lhome${home_mb:+ (${home_mb} MB)}: engines, Python, state, logs (with install.log) and trust records" >&2
   if ((keep_config)); then echo "    but keep the settings ($env_file), $config_dir (menu, tuning rules, API key) and Open WebUI's accounts and chats ($webui_home) (--keep-config)" >&2; fi
   local nmodels=$(( ${#ollama_models[@]} + $(printf '%s\n' "${hub_paths[@]}" | grep -o '/models--[^/]*' | sort -u | grep -c . || true) ))
@@ -8336,6 +8693,9 @@ run_uninstall() {
   done
   ((${#skill_recs[@]})) && info "removed the agent skills llmserver installed"
   [[ -n $hf_link ]] && u_rm "$hf_link"
+  if ((${#share_files[@]})); then
+    if share_off; then info "removed the model-sharing lines from ${share_files[*]}"; else u_fail "could not remove the model-sharing lines from every login file"; fi
+  fi
   # 5. the folder: everything in it, except what the options keep
   LOG_OK=0   # install.log goes too; nothing more is written to it
   if [[ -n $MIGRATE_BLOCKED ]]; then   # still the layout of llmserver < 2.1
@@ -8345,17 +8705,21 @@ run_uninstall() {
   if [[ -f $lhome/$HOME_MARK && $lhome != / && $lhome != "$HOME" && $lhome == /*/* ]]; then
     local keep=()
     ((keep_config)) && keep+=(llmserver.env config webui "$HOME_MARK")
-    ((purge_models)) || keep+=(models)
+    keep+=(models)   # model files: only what llmserver downloaded is deleted (step 3), never other tools' files
     ((kept_skills)) && keep+=(skills "$HOME_MARK")
     for path in "$lhome"/* "$lhome"/.[!.]*; do
       [[ -e $path || -L $path ]] || continue
       [[ " ${keep[*]} " == *" ${path##*/} "* ]] && continue
       rm -rf -- "$path" || u_fail "could not delete $path"
     done
+    if ((purge_models)) && [[ -d $lhome/models ]]; then
+      find "$lhome/models" -depth -type d -empty -delete 2>/dev/null || true
+      [[ -d $lhome/models ]] && U_NOTES+=("kept $lhome/models: it holds model files that llmserver did not download")
+    fi
     rmdir -- "$lhome" 2>/dev/null || true
     if [[ -e $lhome ]]; then info "deleted $lhome, except: $(find "$lhome" -mindepth 1 -maxdepth 1 -printf '%f ')"
     else info "deleted $lhome"; fi
-    [[ -d $lhome/models ]] && U_NOTES+=("kept the models in $lhome/models (--purge-models deletes them)")
+    ((purge_models)) || { [[ -d $lhome/models ]] && U_NOTES+=("kept the models in $lhome/models (--purge-models deletes the ones llmserver downloaded)"); }
   fi
   [[ -f $sys_env_file ]] && ((!keep_config)) && U_NOTES+=("kept the system-wide settings in $sys_env_file; an administrator can delete it")
   # 6. the program itself, last (bash keeps reading this file from its open descriptor)
@@ -8592,8 +8956,8 @@ cmd_chat() {  # [MODEL] [PROMPT...]: talk to a running model (offers to start it
         IFS= read -r reply || reply=""
         [[ -z $reply || ${reply,,} == y* ]] || { info "nothing was started"; return 0; }
       fi
-      if ((yes)); then "$0" "$spec" --yes || die "$spec did not start; see the messages above"
-      else "$0" "$spec" || die "$spec did not start; see the messages above"; fi
+      # --yes here only means "start it without a question"; security warnings still need their own answer
+      "$BASH" "$SELF" "$spec" || die "$spec did not start; see the messages above. To accept its security warnings, start it yourself: '$PROG $spec'"
       running_scan; rec_select "$spec" || die "$spec started, but its record was not found ('$PROG ps')"
     fi
   elif ((${#R_FILES[@]} == 1)); then REC=${R_FILES[0]}
@@ -8614,7 +8978,7 @@ cmd_chat() {  # [MODEL] [PROMPT...]: talk to a running model (offers to start it
     [[ -n $reply ]] || { info "nothing was started"; return 0; }
     { [[ $reply =~ ^[0-9]+$ ]] && ((reply >= 1 && reply <= ${#specs[@]})); } || die "the menu has entries 1-${#specs[@]}"
     idx=$((reply - 1)); spec=${specs[idx]}
-    "$0" "$spec" || die "$spec did not start; see the messages above"
+    "$BASH" "$SELF" "$spec" || die "$spec did not start; see the messages above"
     running_scan; rec_select "$spec" || die "$spec started, but its record was not found ('$PROG ps')"
   fi
   load_rec "$REC"
@@ -8664,8 +9028,9 @@ svc_launch() {  # name log env-assignments... -- argv...: start detached in its 
   log_write info "$name: started pid $SVC_PID"
 }
 svc_wait() {  # name url seconds: wait until the url answers; status 1 if the process died, 2 on time-out
-  local name=$1 url=$2 deadline=$((SECONDS + $3)) next=$((SECONDS + 15))
-  until lcurl -o /dev/null --max-time 3 "$url" 2>/dev/null; do
+  local name=$1 url=$2 deadline=$((SECONDS + $3)) next=$((SECONDS + 15)) insecure_local=()
+  [[ $url == https://* ]] && insecure_local=(-k)   # our own server on this computer; the certificate is for its network names
+  until lcurl -o /dev/null --max-time 3 "${insecure_local[@]}" "$url" 2>/dev/null; do
     pid_alive "$SVC_PID" || return 1
     ((SECONDS < deadline)) || return 2
     if ((SECONDS >= next)); then info "still starting $name (${SECONDS}s)"; next=$((SECONDS + 15)); fi
@@ -8677,13 +9042,24 @@ gateway_url() { printf 'http://%s/v1\n' "$(hostport "$(connect_host "${CFG[GATEW
 gateway_py() {
   cat <<'GATEWAYPY'
 """llmserver gateway: one OpenAI-compatible address for every running model (standard library only)"""
-import http.client, ipaddress, json, os, socket, sys, time
+import hmac, http.client, ipaddress, json, os, re, socket, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOST, PORT, RUN, KEYFILE, REQUIRE = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5] == '1'
+E = os.environ
+HOST, PORT, RUN, KEYFILE = E['GW_HOST'], int(E['GW_PORT']), E['GW_RUN'], E['GW_KEYFILE']
+KEY_LOCAL = E.get('GW_KEY_LOCAL') == '1'          # LLMSERVER_AUTH=key: clients on this computer need the key too
+AUTOLOAD = E.get('GW_AUTOLOAD') == 'on'           # start a checked menu model when a request names it
+IDLE = int(E.get('GW_IDLE_MIN') or 0) * 60        # stop the models that the gateway started after this idle time
+MENU, SELF, BASH = E.get('GW_MENU', ''), E.get('GW_SELF', ''), E.get('GW_BASH', '/bin/bash')
+START_TIMEOUT = int(E.get('GW_START_TIMEOUT') or 1020)
 ROUTES = ('/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/responses')
 RERANK = ('/v1/rerank', '/rerank', '/v1/reranking')   # to a reranker (a llama.cpp model started with --reranking)
 MAX_BODY = 64 << 20
+SLOTS = threading.BoundedSemaphore(int(E.get('GW_MAX_CONN') or 64))
+LOCK = threading.Lock()                           # the shared counters
+START_LOCK = threading.Lock()                     # one start at a time
+STARTED, LAST = {}, {}                            # spec -> time the gateway started it; name -> last request
+COUNT, IN_FLIGHT = {}, [0]
 
 def key():
     try: return open(KEYFILE).read().strip()
@@ -8718,96 +9094,201 @@ def backends():
                      'role': st.get('ROLE', '')}
     return out
 
+def menu():   # name -> spec: the checked menu models that the gateway may start (written by llmserver)
+    out = {}
+    if not AUTOLOAD: return out
+    try:
+        for line in open(MENU):
+            name, _, spec = line.rstrip('\n').partition('\t')
+            if name and spec: out.setdefault(name, spec)
+    except OSError: pass
+    return out
+
 def loopback(addr):
     try: return ipaddress.ip_address(addr.split('%')[0]).is_loopback
     except ValueError: return False
 
+def count(model, path, code):
+    with LOCK:
+        k = (model, path, code); COUNT[k] = COUNT.get(k, 0) + 1
+
+def start(name, spec):
+    """start a menu model with llmserver itself (the normal start: memory plan, security record, sandbox).
+    It never downloads and never answers a question: a model must have passed the checks before."""
+    with START_LOCK:
+        if name in backends(): return None
+        env = dict(E); env.update({'_LLMSERVER_NO_FETCH': '1', '_LLMSERVER_SERVICE': 'gateway', 'NO_COLOR': '1'})
+        sys.stderr.write('%s autoload %s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S'), spec)); sys.stderr.flush()
+        try:
+            r = subprocess.run([BASH, SELF, spec], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=START_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return 'the start of %s did not finish (%s)' % (spec, type(e).__name__)
+        if r.returncode != 0:
+            lines = [l for l in (r.stderr or '').splitlines() if l.strip()]
+            why = next((l for l in reversed(lines) if 'error' in l), lines[-1] if lines else 'exit status %d' % r.returncode)
+            return re.sub(r'\x1b\[[0-9;]*m', '', why).replace('llmserver: error: ', '')
+        STARTED[spec] = time.time(); LAST[name] = time.time()
+        return None
+
+def idle_stopper():
+    while True:
+        time.sleep(60)
+        now = time.time(); running = {v['spec']: k for k, v in backends().items()}
+        for spec in list(STARTED):
+            name = running.get(spec)
+            if name is None: STARTED.pop(spec, None); continue   # someone else stopped it
+            if now - LAST.get(name, STARTED[spec]) < IDLE or IN_FLIGHT[0]: continue
+            sys.stderr.write('%s idle-stop %s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S'), spec)); sys.stderr.flush()
+            subprocess.run([BASH, SELF, 'stop', spec], env=dict(E, NO_COLOR='1'), stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+            STARTED.pop(spec, None)
+
 class H(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'llmserver-gateway'
+    timeout = 60   # a client that sends nothing for 60 s is dropped (answers stream without this limit)
     def log_message(self, fmt, *a): pass
     def note(self, code, model='-', t0=None):
+        count(model, self.path.split('?')[0], code)
         sys.stderr.write('%s %s %s %s %s %d %s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S'), self.client_address[0], self.command,
                          self.path.split('?')[0], model, code, '%.2fs' % (time.time() - t0) if t0 else '-'))
         sys.stderr.flush()
-    def reply(self, code, obj):
-        b = json.dumps(obj).encode()
-        self.send_response(code); self.send_header('Content-Type', 'application/json')
+    def reply(self, code, obj, ctype='application/json'):
+        b = obj.encode() if isinstance(obj, str) else json.dumps(obj).encode()
+        self.send_response(code); self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
     def error(self, code, msg, kind='invalid_request_error', ecode=None):
         self.reply(code, {'error': {'message': msg, 'type': kind, 'code': ecode}}); self.note(code)
-    def allowed(self):   # this computer: always; the network: only with the API key (REQUIRE: bound to the network)
-        if loopback(self.client_address[0]): return True
-        k = key()
-        if k and self.headers.get('Authorization', '') == 'Bearer ' + k: return True
+    def allowed(self):   # this computer: free unless LLMSERVER_AUTH=key; the network: only with the API key
+        if loopback(self.client_address[0]) and not KEY_LOCAL: return True
+        k = key(); got = self.headers.get('Authorization', '')
+        if k and hmac.compare_digest(got.encode(), ('Bearer ' + k).encode()): return True
         self.error(401, 'a valid API key is required (llmserver env shows it)', 'authentication_error', 'invalid_api_key'); return False
+    def handle_one_request(self):
+        if not SLOTS.acquire(blocking=False):
+            try: self.raw_requestline = self.rfile.readline(65537); self.parse_request(); self.error(503, 'the gateway is busy; try again', 'server_error')
+            except Exception: pass
+            self.close_connection = True; return
+        try: super().handle_one_request()
+        finally: SLOTS.release()
     def do_GET(self):
         path = self.path.split('?')[0]
-        if path == '/health': return self.reply(200, {'status': 'ok', 'models': len(backends())})
+        if path == '/health': return self.reply(200, {'status': 'ok'})
         if not self.allowed(): return
         if path in ('/v1/models', '/models'):
-            now = int(time.time())
-            data = [{'id': k, 'object': 'model', 'created': now, 'owned_by': 'llmserver',
-                     'llmserver': {'spec': v['spec'], 'engine': v['engine'], 'port': v['port']}}
-                    for k, v in backends().items() if not v['role']]   # rerankers and embedding servers are not for chat
+            now = int(time.time()); b = backends(); seen = set()
+            data = []
+            for k, v in b.items():
+                if v['role']: continue   # rerankers and embedding servers are not for chat
+                seen.add(k)
+                data.append({'id': k, 'object': 'model', 'created': now, 'owned_by': 'llmserver',
+                             'llmserver': {'spec': v['spec'], 'engine': v['engine'], 'port': v['port'], 'running': True}})
+            for k, spec in menu().items():
+                if k not in seen: data.append({'id': k, 'object': 'model', 'created': now, 'owned_by': 'llmserver', 'llmserver': {'spec': spec, 'running': False}})
             self.reply(200, {'object': 'list', 'data': data}); return self.note(200)
+        if path == '/metrics':
+            b = backends()
+            with LOCK: rows = sorted(COUNT.items())
+            lines = ['# TYPE llmserver_requests_total counter']
+            lines += ['llmserver_requests_total{model="%s",path="%s",status="%d"} %d' % (m.replace('"', ''), p, c, n) for (m, p, c), n in rows]
+            lines += ['# TYPE llmserver_requests_in_flight gauge', 'llmserver_requests_in_flight %d' % IN_FLIGHT[0],
+                      '# TYPE llmserver_models_running gauge', 'llmserver_models_running %d' % len(b),
+                      '# TYPE llmserver_models_started_by_gateway gauge', 'llmserver_models_started_by_gateway %d' % len(STARTED)]
+            self.reply(200, '\n'.join(lines) + '\n', 'text/plain; version=0.0.4'); return
         self.error(404, 'not found: %s' % path)
     def do_POST(self):
         t0 = time.time(); path = self.path.split('?')[0]
         if not self.allowed(): return
         if path not in ROUTES and path not in RERANK: return self.error(404, 'not found: %s' % path)
-        n = int(self.headers.get('Content-Length') or 0)
-        if n > MAX_BODY: return self.error(413, 'the request is too large')
+        if 'chunked' in self.headers.get('Transfer-Encoding', '').lower(): return self.error(411, 'send a Content-Length')
+        try: n = int(self.headers.get('Content-Length') or 0)
+        except ValueError: return self.error(400, 'the Content-Length is not a number')
+        if n < 0 or n > MAX_BODY: return self.error(413, 'the request is too large')
         try: body = json.loads(self.rfile.read(n) or b'{}')
-        except ValueError: return self.error(400, 'the request body is not JSON')
+        except (ValueError, OSError): return self.error(400, 'the request body is not JSON')
+        if not isinstance(body, dict): return self.error(400, 'the request body is not a JSON object')
         role = 'rerank' if path in RERANK else None
-        b = {k: v for k, v in backends().items() if (v['role'] == 'rerank') == (role == 'rerank') or (path == '/v1/embeddings' and v['role'] == 'embedding')}
-        if path in RERANK: path = '/v1/rerank'
-        want = body.get('model')
+        def pick():
+            return {k: v for k, v in backends().items() if (v['role'] == 'rerank') == (role == 'rerank') or (path == '/v1/embeddings' and v['role'] == 'embedding')}
+        b = pick(); want = body.get('model')
         if not want and len(b) == 1: want = next(iter(b))
+        if want not in b and role is None:
+            spec = menu().get(want)
+            if spec:
+                why = start(want, spec)
+                if why: return self.error(503, "the gateway could not start '%s': %s" % (want, why), 'server_error', 'model_not_started')
+                b = pick()
         if want not in b:
             run = ', '.join(sorted(b)) or 'none'
             return self.error(404, "model '%s' is not running (running: %s); start it with 'llmserver MODEL'" % (want, run), ecode='model_not_found')
-        be = b[want]; body['model'] = be['model']
+        if path in RERANK: path = '/v1/rerank'
+        be = b[want]; body['model'] = be['model']; LAST[want] = time.time()
         data = json.dumps(body).encode()
         h = {'Content-Type': 'application/json', 'Accept': self.headers.get('Accept', '*/*')}
         k = key()
         if k: h['Authorization'] = 'Bearer ' + k
+        with LOCK: IN_FLIGHT[0] += 1
         try:
-            c = http.client.HTTPConnection(be['host'], be['port'], timeout=900)
-            c.request('POST', path, body=data, headers=h); r = c.getresponse()
-        except OSError as e:
-            return self.error(502, "model '%s' does not answer (%s); see 'llmserver ps'" % (want, e), 'server_error')
-        self.send_response(r.status)
-        self.send_header('Content-Type', r.getheader('Content-Type', 'application/json'))
-        self.send_header('Cache-Control', 'no-cache'); self.send_header('Connection', 'close')
-        self.end_headers(); self.close_connection = True
-        try:
-            while True:
-                chunk = r.read1(65536) if hasattr(r, 'read1') else r.read(65536)
-                if not chunk: break
-                self.wfile.write(chunk); self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass   # the client went away: closing the upstream connection stops the generation
+            try:
+                c = http.client.HTTPConnection(be['host'], be['port'], timeout=900)
+                c.request('POST', path, body=data, headers=h); r = c.getresponse()
+            except OSError as e:
+                return self.error(502, "model '%s' does not answer (%s); see 'llmserver ps'" % (want, e), 'server_error')
+            self.send_response(r.status)
+            self.send_header('Content-Type', r.getheader('Content-Type', 'application/json'))
+            self.send_header('Cache-Control', 'no-cache'); self.send_header('Connection', 'close')
+            self.end_headers(); self.close_connection = True
+            try:
+                while True:
+                    chunk = r.read1(65536) if hasattr(r, 'read1') else r.read(65536)
+                    if not chunk: break
+                    self.wfile.write(chunk); self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                pass   # the client went away: closing the upstream connection stops the generation
+            finally:
+                c.close()
+            self.note(r.status, want, t0)
         finally:
-            c.close()
-        self.note(r.status, want, t0)
+            with LOCK: IN_FLIGHT[0] -= 1
+            LAST[want] = time.time()
 
 class S(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     address_family = socket.AF_INET6 if ':' in HOST else socket.AF_INET
 
-sys.stderr.write('llmserver gateway on %s:%d\n' % (HOST, PORT)); sys.stderr.flush()
+if AUTOLOAD and IDLE > 0: threading.Thread(target=idle_stopper, daemon=True).start()
+sys.stderr.write('llmserver gateway on %s:%d (autoload %s, idle stop %s)\n' % (HOST, PORT, 'on' if AUTOLOAD else 'off', '%d min' % (IDLE // 60) if IDLE else 'off')); sys.stderr.flush()
 S((HOST.strip('[]'), PORT), H).serve_forever()
 GATEWAYPY
 }
-gateway_start() {  # quiet(0|1): start the gateway if it is not running
-  local py h=${CFG[GATEWAY_HOST]} p=${CFG[GATEWAY_PORT]} require=0 f
+gateway_menu_write() {  # the menu models the gateway may start: name<TAB>spec, only models with a check record
+  local i e m f=$svc_dir/gateway-menu.tsv
+  [[ ${CFG[GATEWAY_AUTOLOAD]} == on ]] || { rm -f -- "$f"; return 0; }
+  mkdir -p "$svc_dir"
+  { for i in "${!specs[@]}"; do
+      e=${specs[i]%%:*} m=${specs[i]#*:}
+      [[ " ${extras[i]} " == *" --rerank"* || " ${extras[i]} " == *" --embedding"* || " ${extras[i]} " == *" --task"* ]] && continue
+      trust_find "$e" "$m" >/dev/null || continue
+      printf '%s\t%s\n' "$(model_id "$e" "$m")" "${specs[i]}"
+    done; } > "$f.tmp.$$" && mv -f -- "$f.tmp.$$" "$f"
+}
+gateway_menu_refresh() {  # after the menu or the records change: tell a running gateway (autoload on)
+  [[ ${CFG[GATEWAY_AUTOLOAD]} == on && -e $svc_dir/gateway-menu.tsv ]] || return 0
+  MENU_QUIET=1 load_models; gateway_menu_write
+}
+gateway_env() {  # the environment of the gateway: what an engine may see, and what llmserver needs to start one
+  local v
+  for v in $(compgen -e); do
+    [[ $v =~ $ENGINE_ENV_RE || $v =~ ^(LLMSERVER_HOME|LLMSERVER_SYS_ENV_FILE|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE)$ ]] && printf '%s=%s\n' "$v" "${!v}"
+  done
+}
+gateway_start() {  # quiet(0|1): start the gateway if it is not running; GW_STARTED=1 when this run started it
+  local py h=${CFG[GATEWAY_HOST]} p=${CFG[GATEWAY_PORT]} f envs=()
+  GW_STARTED=0
   if svc_alive gateway; then (($1)) || info "the gateway is running: $(gateway_url)"; return 0; fi
   py=$(helper_python) || { runtime_ready || die "the gateway needs llmserver's runtime: '$PROG install runtime'"; py=$(helper_python); }
+  [[ ${CFG[AUTH]} == key ]] && ensure_key
   if ! is_loopback "$h"; then
-    require=1
     if [[ ${CFG[AUTH]} == none ]] && ((!CFG[ALLOW_INSECURE])); then die "the gateway on $h would give the network every model without a key; keep LLMSERVER_GATEWAY_HOST=127.0.0.1, or use LLMSERVER_AUTH=auto or key"; fi
     ensure_key
   fi
@@ -8815,12 +9296,18 @@ gateway_start() {  # quiet(0|1): start the gateway if it is not running
   lhome_init; mkdir -p "$svc_dir" "$lhome/runtime"
   f=$lhome/runtime/gateway.py
   (umask 022; gateway_py > "$f.tmp.$$" && mv -f -- "$f.tmp.$$" "$f")
-  svc_launch gateway "$logs_dir/gateway.log" "PATH=/usr/bin:/bin" "LANG=C.UTF-8" -- "$py" -I "$f" "$h" "$p" "$run_dir" "$key_file" "$require"
+  gateway_menu_write
+  mapfile -t envs < <(gateway_env)
+  envs+=("LANG=C.UTF-8" "GW_HOST=$h" "GW_PORT=$p" "GW_RUN=$run_dir" "GW_KEYFILE=$key_file" "GW_KEY_LOCAL=$([[ ${CFG[AUTH]} == key ]] && echo 1 || echo 0)"
+    "GW_AUTOLOAD=${CFG[GATEWAY_AUTOLOAD]}" "GW_IDLE_MIN=${CFG[GATEWAY_IDLE_STOP]}" "GW_MENU=$svc_dir/gateway-menu.tsv"
+    "GW_SELF=$SELF" "GW_BASH=$BASH" "GW_START_TIMEOUT=$((CFG[READY_TIMEOUT] + 120))")
+  svc_launch gateway "$logs_dir/gateway.log" "${envs[@]}" -- "$py" -I "$f"
   if ! svc_wait gateway "http://$(hostport "$(connect_host "$h")" "$p")/health" 15; then
     die "the gateway did not start; see $logs_dir/gateway.log"
   fi
   rec_write "$(svc_file gateway)" "ENGINE=service" "PID=$SVC_PID" "STARTTIME=$(pid_starttime "$SVC_PID")" "HOST=$h" "PORT=$p" "LOG=$logs_dir/gateway.log" "STARTED=$(date +%s)"
-  (($1)) || info "${C_B}gateway ready${C_0}: $(gateway_url) (every running model$(is_loopback "$h" && echo ', for this computer' || echo '; the network needs the API key'))"
+  GW_STARTED=1
+  (($1)) || info "${C_B}gateway ready${C_0}: $(gateway_url) (every running model$( [[ ${CFG[GATEWAY_AUTOLOAD]} == on ]] && echo ', and the checked menu models on demand')$( [[ ${CFG[AUTH]} == key ]] && echo '; every client needs the API key' || { is_loopback "$h" && echo ', for this computer' || echo '; the network needs the API key'; }))"
 }
 cmd_gateway() {
   case $sub in
@@ -8830,7 +9317,8 @@ cmd_gateway() {
       svc_stop gateway ;;
     status)
       if svc_alive gateway; then
-        local n; n=$(lcurl --max-time 3 "$(gateway_url)/models" 2>/dev/null | grep -o '"id"' | grep -c . || true)
+        local n hdr=(); [[ -s $key_file ]] && hdr=(-H "Authorization: Bearer $(<"$key_file")")
+        n=$(lcurl --max-time 3 "${hdr[@]}" "$(gateway_url)/models" 2>/dev/null | grep -o '"running": *true' | grep -c . || true)
         echo "gateway: running at $(gateway_url), pid ${ST[PID]}, $n model(s) behind it"
       else echo "gateway: not running ('$PROG gateway start')"; fi ;;
   esac
@@ -8903,6 +9391,12 @@ webui_models() {  # the embedding model, and the fast reranker when it is used
   fi
   return 0
 }
+tool_prune() {  # folder keep service: delete the older versions of a tool (only when its service does not run)
+  local d
+  svc_alive "$3" && { info "the older $3 stays until '$PROG webui restart' and the next upgrade"; return 0; }
+  for d in "$1"/*/; do d=${d%/}; [[ ${d##*/} == "$2" || -L $d ]] || { rm -rf -- "$d"; note "removed the older $3 ${d##*/}"; }; done
+  return 0
+}
 install_webui() {
   local d lock st py
   py=$(pin python_engine) d=$(webui_dir)
@@ -8924,6 +9418,7 @@ install_webui() {
     mkdir -p "${d%/*}"; chmod -R go-w -- "$st/venv"
     rm -rf -- "$d"; mv -- "$st/venv" "$d"; rm -rf -- "$st"
     log_write info "installed Open WebUI $(pin webui) into $d"
+    tool_prune "${d%/*}" "${d##*/}" webui
   fi
   mkdir -p "$webui_home"/{data,home}; chmod 700 "$webui_home"
   webui_models
@@ -8986,6 +9481,7 @@ install_searxng() {
   chmod -R go-w -- "$st/venv" "$st/src"
   rm -rf -- "$d"; mkdir -p "$d"; mv -- "$st/src" "$d/src"; mv -- "$st/venv" "$d/venv"; rm -rf -- "$st"
   log_write info "installed SearXNG ${c:0:12} into $d"
+  tool_prune "${d%/*}" "${d##*/}" searxng
 }
 searxng_secret() { local f=$config_dir/searxng-secret
   if [[ ! -s $f ]]; then mkdir -p "$config_dir"; (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f"); fi
@@ -9029,8 +9525,8 @@ searxng_start() {  # start SearXNG on 127.0.0.1 unless it runs; status 1 if it c
     "SEARXNG_SETTINGS_PATH=$set" "SEARXNG_SECRET=$(searxng_secret)")
   mapfile -t -O "${#envs[@]}" envs < <(proxy_env)
   if [[ ${CFG[SANDBOX]} != off ]] && sandbox_works; then
-    sb=(bwrap --unshare-ipc --unshare-uts --unshare-cgroup-try --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /var/tmp
-      --tmpfs "$HOME" --tmpfs "$lhome" --ro-bind "$d" "$d" --ro-bind-try "$lhome/python" "$lhome/python" --ro-bind "$set" "$set"
+    sandbox_base --dev /dev
+    sb=("${SB_BASE[@]}" --ro-bind "$d" "$d" --ro-bind-try "$lhome/python" "$lhome/python" --ro-bind "$set" "$set"
       --bind "$webui_home/searxng/home" "$webui_home/searxng/home")
     mapfile -t -O "${#sb[@]}" sb < <(ca_binds); sb+=(--)
   elif [[ ${CFG[SANDBOX]} == on ]]; then warn "LLMSERVER_SANDBOX=on, but bubblewrap does not work here, so web search is off"; return 1; fi
@@ -9054,7 +9550,7 @@ rerank_best_start() {  # start it unless it runs (RB_STARTED=1 when this did); s
   engine_enabled llama || { warn "WEBUI_RERANKER=best runs on llama.cpp, which is not enabled here (LLMSERVER_ENGINES); using the fast reranker"; return 1; }
   if ((INSTALL_LOCKED)); then exec 7>&-; INSTALL_LOCKED=0; fi   # the start below may install llama.cpp itself
   info "starting the reranker bge-reranker-v2-m3 on llama.cpp (WEBUI_RERANKER=best)"
-  if ! _LLMSERVER_SERVICE=webui "$0" "$RERANK_BEST_SPEC" --yes --ctx 8192 -- "${RERANK_BEST_FLAGS[@]}"; then
+  if ! _LLMSERVER_SERVICE=webui "$BASH" "$SELF" "$RERANK_BEST_SPEC" --ctx 8192 -- "${RERANK_BEST_FLAGS[@]}"; then
     warn "the best reranker did not start (above); using the fast one. '$PROG $RERANK_BEST_SPEC --ctx 8192 -- ${RERANK_BEST_FLAGS[*]}' shows why"
     return 1
   fi
@@ -9065,8 +9561,9 @@ rerank_best_start() {  # start it unless it runs (RB_STARTED=1 when this did); s
 # holds them (the admin can change them in Admin Panel > Settings). So llmserver also writes them
 # into the database before a start, but only those whose llmserver setting changed since llmserver
 # last wrote them: a change the admin made stays until the llmserver setting changes.
-webui_rag_settings() {  # reranker (fast|best|off) -> RAG_KV: "ENV_NAME db.key json-value"
-  local rr=$1 hybrid=false k=6 model="" engine="" url="" search=false
+webui_gw_key() { if [[ ${CFG[AUTH]} == key && -s $key_file ]]; then cat -- "$key_file"; else echo none; fi; }   # what Open WebUI sends to the gateway
+webui_rag_settings() {  # reranker (fast|best|off) -> RAG_KV: "ENV_NAME db.key json-value" (ENV_NAME - : database only)
+  local rr=$1 hybrid=false k=6 model="" engine="" url="" search=false gk; gk=$(webui_gw_key)
   [[ ${CFG[WEBUI_RAG]} == hybrid ]] && hybrid=true k=20   # hybrid: 20 candidates from each search; the reranker keeps the best 6
   case $rr in fast) model=$RERANK_REPO ;; best) engine=external model=${RERANK_BEST_SPEC#llama:} url=$(gateway_url)/rerank ;; esac
   [[ ${CFG[WEBUI_SEARCH]} == on ]] && search=true
@@ -9078,7 +9575,8 @@ webui_rag_settings() {  # reranker (fast|best|off) -> RAG_KV: "ENV_NAME db.key j
     "RAG_RERANKING_ENGINE rag.reranking_engine \"$engine\""
     "RAG_RERANKING_MODEL rag.reranking_model \"$model\""
     "RAG_EXTERNAL_RERANKER_URL rag.external_reranker_url \"$url\""
-    "RAG_EXTERNAL_RERANKER_API_KEY rag.external_reranker_api_key \"none\""
+    "RAG_EXTERNAL_RERANKER_API_KEY rag.external_reranker_api_key \"$gk\""
+    "- openai.api_keys [\"$gk\"]"
     "ENABLE_WEB_SEARCH web.search.enable $search"
     "WEB_SEARCH_ENGINE web.search.engine \"searxng\""
     "SEARXNG_QUERY_URL web.search.searxng_query_url \"http://127.0.0.1:${CFG[WEBUI_SEARCH_PORT]}/search?q=<query>\""
@@ -9097,13 +9595,18 @@ except (OSError, ValueError): applied = {}
 changed = []
 if os.path.exists(db):
     c = sqlite3.connect(db, timeout=30)
-    if c.execute("select 1 from sqlite_master where type='table' and name='config'").fetchone():
+    cols = {r[1] for r in c.execute("pragma table_info(config)")}
+    if cols and not {'key', 'value', 'updated_at'} <= cols:
+        sys.stderr.write("llmserver: warning: Open WebUI's settings table has an unknown layout; llmserver did not change its settings\n")
+    elif cols:
         cur = {}
         for k, v in c.execute('select key, value from config'):
             try: cur[k] = json.loads(v) if isinstance(v, (str, bytes)) else v
             except ValueError: cur[k] = v
         for k, v in want.items():
-            if applied.get(k, object()) == v or cur.get(k, object()) == v: continue
+            if k == 'openai.api_keys' and isinstance(cur.get(k), list) and cur[k]:
+                v = v[:1] + cur[k][1:]   # only the first connection (the gateway) is llmserver's
+            if applied.get(k, object()) == want[k] or cur.get(k, object()) == v: continue
             c.execute('insert into config (key, value, updated_at) values (?, ?, ?) on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at',
                       (k, json.dumps(v), int(time.time())))
             changed.append(k)
@@ -9120,12 +9623,13 @@ webui_secret() {  # the key that signs Open WebUI's sessions (made once, private
   if [[ ! -s $f ]]; then mkdir -p "$config_dir"; (umask 077; head -c 48 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$f"); fi
   cat -- "$f"
 }
-webui_urls() {  # where people open it
-  local h=${CFG[WEBUI_HOST]} p=${CFG[WEBUI_PORT]} ip
+webui_scheme() { if [[ -n ${CFG[WEBUI_TLS_CERT]} ]]; then echo https; else echo http; fi; }
+webui_urls() {  # where people open it [host]
+  local h=${1:-${CFG[WEBUI_HOST]}} p=${CFG[WEBUI_PORT]} ip sc; sc=$(webui_scheme)
   if [[ $h == 0.0.0.0 || $h == :: ]]; then
-    for ip in $(hostname -I 2>/dev/null); do [[ $ip == 127.* || $ip == *:* ]] || { printf 'http://%s:%s\n' "$ip" "$p"; break; }; done
-    printf 'http://127.0.0.1:%s\n' "$p"
-  else printf 'http://%s\n' "$(hostport "$h" "$p")"; fi
+    for ip in $(hostname -I 2>/dev/null); do [[ $ip == 127.* || $ip == *:* ]] || { printf '%s://%s:%s\n' "$sc" "$ip" "$p"; break; }; done
+    printf '%s://127.0.0.1:%s\n' "$sc" "$p"
+  else printf '%s://%s\n' "$sc" "$(hostport "$h" "$p")"; fi
 }
 webui_accounts() {  # -> "users pending" from its database (read-only), or nothing
   local py db=$webui_home/data/webui.db
@@ -9136,8 +9640,8 @@ r = c.execute("select count(*), sum(role = \"pending\") from user").fetchone()
 print(r[0], r[1] or 0)' "$db" 2>/dev/null || true
 }
 webui_start() {
-  local d h=${CFG[WEBUI_HOST]} p=${CFG[WEBUI_PORT]} envs=() sb=() auth=True u n acc rr=${CFG[WEBUI_RERANKER]} search=off e ev dk jv changed
-  if svc_alive webui; then info "Open WebUI is running: $(webui_urls | head -n 1)"; return 0; fi
+  local d h=${CFG[WEBUI_HOST]} p=${CFG[WEBUI_PORT]} envs=() sb=() auth=True u n acc rr=${CFG[WEBUI_RERANKER]} search=off e ev dk jv changed first=0 run=() sc
+  if svc_alive webui; then info "Open WebUI is running: $(webui_urls "${ST[HOST]}" | head -n 1)"; return 0; fi
   if ! webui_installed; then
     if ((!yes)); then
       [[ -t 0 && -t 2 ]] || die "Open WebUI is not installed; '$PROG install webui' installs it (about $((PIN_SIZE[webui] / 1000)) GB)"
@@ -9150,6 +9654,11 @@ webui_start() {
   mkdir -p "$webui_home"/{data,home,models}; chmod 700 "$webui_home"
   webui_models
   port_in_use "$p" && die "port $p is in use; choose another: '$PROG config set webui_port N'"
+  if [[ ${CFG[WEBUI_AUTH]} == on ]] && ! is_loopback "$h"; then
+    # the first account becomes the admin: until it exists, only this computer may reach the page
+    read -r n acc <<<"$(webui_accounts)"
+    [[ ${n:-} =~ ^[0-9]+$ ]] && ((n > 0)) || { first=1 h=127.0.0.1; }
+  fi
   gateway_start 1
   RB_STARTED=0
   [[ $rr == best ]] && { rerank_best_start || rr=fast; }
@@ -9161,32 +9670,46 @@ webui_start() {
   [[ ${CFG[WEBUI_AUTH]} == off ]] && auth=False
   envs=("PATH=$d/bin:/usr/bin:/bin" "HOME=$webui_home/home" "LANG=C.UTF-8" "PYTHONNOUSERSITE=1"
     "DATA_DIR=$webui_home/data" "STATIC_DIR=$webui_home/data/static" "WEBUI_SECRET_KEY=$(webui_secret)" "WEBUI_AUTH=$auth" "DEFAULT_USER_ROLE=pending"
-    "OPENAI_API_BASE_URL=$(gateway_url)" "OPENAI_API_KEY=none" "ENABLE_OPENAI_API=True" "ENABLE_OLLAMA_API=False"
+    "OPENAI_API_BASE_URL=$(gateway_url)" "OPENAI_API_KEY=$(webui_gw_key)" "ENABLE_OPENAI_API=True" "ENABLE_OLLAMA_API=False"
     "OFFLINE_MODE=true" "HF_HUB_OFFLINE=1" "SENTENCE_TRANSFORMERS_HOME=$webui_home/models"
     "RAG_EMBEDDING_MODEL_AUTO_UPDATE=False" "RAG_RERANKING_MODEL_AUTO_UPDATE=False"
     "RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE=False" "RAG_RERANKING_MODEL_TRUST_REMOTE_CODE=False"
     "ENABLE_LOCAL_WEB_FETCH=False" "FORWARDED_ALLOW_IPS=127.0.0.1"
     "ENABLE_COMMUNITY_SHARING=False" "ENABLE_VERSION_UPDATE_CHECK=False" "ANONYMIZED_TELEMETRY=False" "DO_NOT_TRACK=true" "SCARF_NO_ANALYTICS=true")
-  for e in "${RAG_KV[@]}"; do read -r ev dk jv <<<"$e"; jv=${jv#\"}; envs+=("$ev=${jv%\"}"); done   # for its first start
+  for e in "${RAG_KV[@]}"; do read -r ev dk jv <<<"$e"; [[ $ev == - ]] && continue; jv=${jv#\"}; envs+=("$ev=${jv%\"}"); done   # for its first start
   mapfile -t -O "${#envs[@]}" envs < <(proxy_env)   # web pages for web search; never this computer through a proxy
   if [[ ${CFG[SANDBOX]} != off ]] && sandbox_works; then
-    sb=(bwrap --unshare-ipc --unshare-uts --unshare-cgroup-try --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs /var/tmp
-      --tmpfs "$HOME" --tmpfs "$lhome" --ro-bind "$d" "$d" --ro-bind-try "$lhome/python" "$lhome/python"
+    sandbox_base --dev /dev
+    sb=("${SB_BASE[@]}" --ro-bind "$d" "$d" --ro-bind-try "$lhome/python" "$lhome/python"
       --ro-bind "$webui_home/models" "$webui_home/models" --bind "$webui_home/data" "$webui_home/data" --bind "$webui_home/home" "$webui_home/home")
+    [[ -n ${CFG[WEBUI_TLS_CERT]} ]] && sb+=(--ro-bind "${CFG[WEBUI_TLS_CERT]}" "${CFG[WEBUI_TLS_CERT]}" --ro-bind "${CFG[WEBUI_TLS_KEY]}" "${CFG[WEBUI_TLS_KEY]}")
     mapfile -t -O "${#sb[@]}" sb < <(ca_binds); sb+=(--)
   elif [[ ${CFG[SANDBOX]} == on ]]; then die "LLMSERVER_SANDBOX=on, but bubblewrap does not work here"; fi
-  info "starting Open WebUI $(pin webui) on $(hostport "$h" "$p")$( ((${#sb[@]})) && echo ', in the sandbox')"
-  svc_launch webui "$logs_dir/webui.log" "${envs[@]}" -- "${sb[@]}" "$d/bin/open-webui" serve --host "$h" --port "$p"
-  local rc=0; svc_wait "Open WebUI" "http://$(hostport "$(connect_host "$h")" "$p")/health" "${CFG[READY_TIMEOUT]}" || rc=$?
+  sc=$(webui_scheme)
+  if [[ $sc == https ]]; then   # uvicorn (the server inside Open WebUI) serves HTTPS with your certificate
+    [[ $(stat -c %a -- "${CFG[WEBUI_TLS_KEY]}") =~ ^[0-7][0-7]0$ ]] || warn "${CFG[WEBUI_TLS_KEY]} can be read by other users; run: chmod 600 '${CFG[WEBUI_TLS_KEY]}'"
+    run=("$d/bin/python" -m uvicorn open_webui.main:app --host "$h" --port "$p" --forwarded-allow-ips 127.0.0.1
+      --ssl-certfile "${CFG[WEBUI_TLS_CERT]}" --ssl-keyfile "${CFG[WEBUI_TLS_KEY]}")
+    envs+=("FROM_INIT_PY=true")
+  else run=("$d/bin/open-webui" serve --host "$h" --port "$p"); fi
+  info "starting Open WebUI $(pin webui) on $sc://$(hostport "$h" "$p")$( ((${#sb[@]})) && echo ', in the sandbox')"
+  svc_launch webui "$logs_dir/webui.log" "${envs[@]}" -- "${sb[@]}" "${run[@]}"
+  local rc=0; svc_wait "Open WebUI" "$sc://$(hostport "$(connect_host "$h")" "$p")/health" "${CFG[READY_TIMEOUT]}" || rc=$?
   case $rc in
     1) die "Open WebUI stopped while starting; see $logs_dir/webui.log" ;;
     2) stop_pid "$SVC_PID" 1 || true; die "Open WebUI did not start within ${CFG[READY_TIMEOUT]}s; see $logs_dir/webui.log" ;;
   esac
   rec_write "$(svc_file webui)" "ENGINE=service" "PID=$SVC_PID" "STARTTIME=$(pid_starttime "$SVC_PID")" "HOST=$h" "PORT=$p" "LOG=$logs_dir/webui.log" "STARTED=$(date +%s)" "VERSION=$(pin webui)" \
-    "RAG=${CFG[WEBUI_RAG]}" "RERANKER=$rr" "SEARCH=$search" "RERANK_STARTED=$RB_STARTED"
-  info "${C_B}Open WebUI ready${C_0}: $(webui_urls | head -n 1)$( [[ $h == 0.0.0.0 ]] && echo " (people on your network use this address; here also $(webui_urls | tail -n 1))")"
-  read -r n acc <<<"$(webui_accounts)"
-  if [[ $auth == True && ${n:-0} == 0 ]]; then info "  open it and create the first account: it becomes the admin. Then add people in Admin Panel > Users, or turn on new sign-ups there (they wait for the admin's approval)"; fi
+    "RAG=${CFG[WEBUI_RAG]}" "RERANKER=$rr" "SEARCH=$search" "RERANK_STARTED=$RB_STARTED" "GATEWAY_STARTED=$GW_STARTED" "FIRST=$first"
+  info "${C_B}Open WebUI ready${C_0}: $(webui_urls "$h" | head -n 1)$( [[ $h == 0.0.0.0 ]] && echo " (people on your network use this address; here also $(webui_urls "$h" | tail -n 1))")"
+  if ((first)); then
+    info "  ${C_B}first start${C_0}: Open WebUI listens on this computer only until its admin account exists, so nobody on the network can take that account."
+    info "  1. On this computer, open $sc://127.0.0.1:$p and create the account. (From another computer: 'ssh -L $p:127.0.0.1:$p ${USER:-you}@$(hostname 2>/dev/null || echo this-computer)', then open the same address there.)"
+    info "  2. Type '$PROG webui restart'. Then people on the network can use it."
+  elif [[ $auth == True ]]; then
+    read -r n acc <<<"$(webui_accounts)"
+    [[ ${n:-0} == 0 ]] && info "  open it and create the first account: it becomes the admin. Then add people in Admin Panel > Users, or turn on new sign-ups there (they wait for the admin's approval)"
+  fi
   info "  it chats with every running model through the gateway ($(gateway_url)); start models with '$PROG MODEL'"
   info "  documents: $(webui_rag_line "${CFG[WEBUI_RAG]}" "$rr"); web search: $(webui_search_line "$search")"
 }
@@ -9199,13 +9722,13 @@ webui_rag_line() {  # rag reranker -> how documents are searched, in words
   esac
 }
 webui_search_line() { if [[ $1 == on ]]; then echo "on, through SearXNG on 127.0.0.1:${CFG[WEBUI_SEARCH_PORT]} (each chat turns it on with its Web Search button)"; else echo "off ('$PROG config set webui_search on' turns it on)"; fi; }
-webui_stop() {
-  local rs=0
-  if svc_alive webui; then [[ ${ST[RERANK_STARTED]:-0} == 1 ]] && rs=1; fi
+webui_stop() {  # stops Open WebUI and what it started (SearXNG, the best reranker, the gateway); a gateway you started stays
+  local rs=0 gw=0
+  if svc_alive webui; then [[ ${ST[RERANK_STARTED]:-0} == 1 ]] && rs=1; [[ ${ST[GATEWAY_STARTED]:-1} == 1 ]] && gw=1; fi
   svc_stop webui "Open WebUI"
   svc_alive searxng && svc_stop searxng SearXNG
-  if ((rs)) && rerank_best_running; then "$0" stop "${ST[PORT]}" || warn "the reranker did not stop; '$PROG ps' shows it"; fi
-  svc_stop gateway
+  if ((rs)) && rerank_best_running; then "$BASH" "$SELF" stop "${ST[PORT]}" || warn "the reranker did not stop; '$PROG ps' shows it"; fi
+  if ((gw)); then svc_stop gateway; elif svc_alive gateway; then info "the gateway keeps running (Open WebUI did not start it); '$PROG gateway stop' stops it"; fi
 }
 cmd_webui() {
   local n acc
@@ -9216,7 +9739,8 @@ cmd_webui() {
     status)
       if ! webui_installed; then echo "Open WebUI: not installed ('$PROG install webui')"; return 0; fi
       if svc_alive webui; then
-        echo "Open WebUI $(pin webui): running at $(webui_urls | head -n 1), pid ${ST[PID]}"
+        echo "Open WebUI $(pin webui): running at $(webui_urls "${ST[HOST]}" | head -n 1), pid ${ST[PID]}"
+        [[ ${ST[FIRST]:-0} == 1 ]] && echo "  this computer only, until the admin account exists: create it, then '$PROG webui restart'"
         local rag=${ST[RAG]:-hybrid} rr=${ST[RERANKER]:-fast} se=${ST[SEARCH]:-off}
         echo "  documents: $(webui_rag_line "$rag" "$rr")"
         if [[ $rr == best && $rag == hybrid ]] && ! rerank_best_running; then echo "  the reranker is not running, so questions about documents fail: '$PROG webui restart'"; fi
@@ -9258,7 +9782,9 @@ cmd_key() {
         ((n++)) || info "these models still use the old key until they restart:"
         info "  ${ST[SPEC]} (port ${ST[PORT]}): '$PROG ${ST[SPEC]} --restart'"
       done
-      info "clients get the new key with '$PROG env MODEL'" ;;
+      info "clients get the new key with '$PROG env MODEL'"
+      svc_alive gateway && info "the gateway reads the new key at once"
+      svc_alive webui && [[ ${CFG[AUTH]} == key ]] && info "Open WebUI uses the gateway with the key: type '$PROG webui restart'" ;;
   esac
   return 0
 }
@@ -9270,7 +9796,7 @@ as_unit() {  # spec -> the instance name of llmserver@.service
   else printf 'llmserver@%s.service\n' "$(printf '%s' "$1" | sed -e 's/\\/\\x5c/g' -e 's/-/\\x2d/g' -e 's#/#-#g' -e 's/:/\\x3a/g' -e 's/@/\\x40/g')"; fi
 }
 as_template() {  # write llmserver@.service (it starts the model given as the instance name)
-  local self d; self=$(readlink -f -- "$0"); d=$(as_dir)
+  local self="$BASH $SELF" d; d=$(as_dir)
   mkdir -p "$d"
   cat > "$d/llmserver@.service.tmp.$$" <<UNIT
 # made by '$PROG autostart'; '$PROG autostart off' and '$PROG uninstall' remove it
@@ -9293,7 +9819,7 @@ UNIT
   mv -f -- "$d/llmserver@.service.tmp.$$" "$d/llmserver@.service"
 }
 as_webui() {  # on|off: Open WebUI (and its gateway) at login, as a systemd user service
-  local d f self; d=$(as_dir); f=$d/llmserver-webui.service; self=$(readlink -f -- "$0")
+  local d f self="$BASH $SELF"; d=$(as_dir); f=$d/llmserver-webui.service
   if [[ $1 == on ]]; then
     webui_installed || die "Open WebUI is not installed; '$PROG install webui' first"
     mkdir -p "$d"
@@ -9398,8 +9924,8 @@ cfg_value() {  # full name -> the value in effect
   if [[ $1 == LLMSERVER_* && -v CFG[$short] ]]; then printf '%s' "${CFG[$short]}"; else setting "$1" ""; fi
 }
 cfg_check() {  # name value: would the settings be valid with this value? (llmserver itself checks, with the value in its environment)
-  env "$1=$2" "$0" config list >/dev/null 2>&1 && return 0
-  env "$1=$2" "$0" config list 2>&1 >/dev/null | sed -n 's/^.*error: //p' | head -n 1
+  env "$1=$2" "$BASH" "$SELF" config list >/dev/null 2>&1 && return 0
+  env "$1=$2" "$BASH" "$SELF" config list 2>&1 >/dev/null | sed -n 's/^.*error: //p' | head -n 1
   return 1
 }
 cfg_write() {  # name value|"" unset(0|1): change the settings file in place, keeping comments and other lines
@@ -9445,7 +9971,11 @@ cmd_config() {  # list | get NAME | set NAME VALUE | unset NAME | edit [tuning]
       v="${config_args[*]:1}"
       cfg_key "$a"
       if [[ $CK_KIND == llmserver ]]; then
-        err=$(cfg_check "$CK" "$v") || die "not saved: $err"
+        if ! err=$(cfg_check "$CK" "$v"); then
+          [[ -n $err ]] || die "not saved: llmserver could not check the value (run '$PROG config list' to see why)"
+          [[ $err == *"$CK"* || $err == *"${CK#LLMSERVER_}"* ]] || die "not saved: another setting has a problem, correct it first: $err"
+          die "not saved: $err"
+        fi
       fi
       cfg_write "$CK" "$v" 0
       info "set $CK=$(cfg_show "$CK" "$v") in $env_file"
@@ -9467,17 +9997,86 @@ cmd_config() {  # list | get NAME | set NAME VALUE | unset NAME | edit [tuning]
       [[ -z $a || $a == settings ]] || die "'$PROG config edit' opens the settings; '$PROG config edit tuning' the tuning rules; '$PROG model edit' the menu"
       [[ -e $env_file ]] || write_env_file
       model_editor "$env_file"
-      err=$("$0" config list 2>&1 >/dev/null) || { printf '%s\n' "$err" >&2; die "the settings have a problem (above); run '$PROG config edit' again to correct it"; }
+      err=$("$BASH" "$SELF" config list 2>&1 >/dev/null) || { printf '%s\n' "$err" >&2; die "the settings have a problem (above); run '$PROG config edit' again to correct it"; }
       [[ -n $err ]] && printf '%s\n' "$err" >&2
       info "saved $env_file; the settings are valid" ;;
   esac
   return 0
 }
 
+# ---- backup and restore: what you cannot download again ---------------------------
+# The settings, the menu, the API key, the secrets, the check records, the ports and pins, the
+# skills, and Open WebUI's accounts, chats and uploads. Not the engines or the models: 'install' and
+# the check records get them again. Open WebUI's database is copied with SQLite's own backup, so it
+# is consistent even while Open WebUI operates.
+readonly BACKUP_ITEMS=(llmserver.env config trust/records state/ports state/pins skills webui/data webui/llmserver-applied.json)
+cmd_backup() {
+  local out=${opt_output:-$PWD/llmserver-backup-$(date +%Y%m%d-%H%M%S).tar.gz} st i have=() py
+  [[ $out == /* ]] || out=$PWD/$out
+  [[ ! -e $out ]] || die "$out exists; give another name with -o"
+  lhome_init
+  st=$(mktemp -d "$lhome/tmp/backup.XXXXXX")
+  for i in "${BACKUP_ITEMS[@]}"; do
+    [[ -e $lhome/$i ]] || continue
+    if [[ $i == webui/data ]]; then
+      mkdir -p "$st/webui"; cp -a -- "$lhome/webui/data" "$st/webui/" && rm -f -- "$st/webui/data/webui.db"
+      if [[ -f $lhome/webui/data/webui.db ]]; then
+        py=$(helper_python) || { rm -rf -- "$st"; die "the backup of Open WebUI's database needs llmserver's runtime"; }
+        py_env "$py" -I -c 'import sqlite3, sys
+a = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True); b = sqlite3.connect(sys.argv[2])
+a.backup(b); b.close(); a.close()' "$lhome/webui/data/webui.db" "$st/webui/data/webui.db" || { rm -rf -- "$st"; die "could not copy Open WebUI's database"; }
+      fi
+    else mkdir -p "$st/$(dirname -- "$i")"; cp -a -- "$lhome/$i" "$st/$i"; fi
+    have+=("$i")
+  done
+  ((${#have[@]})) || { rm -rf -- "$st"; die "there is nothing to back up yet"; }
+  printf '%s %s %s\n' "$PROG" "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$st/.llmserver-backup"
+  (umask 077; tar -czf "$out" -C "$st" .llmserver-backup "${have[@]}") || { rm -rf -- "$st" "$out"; die "could not write $out"; }
+  rm -rf -- "$st"
+  log_write info "backup: ${have[*]} to $out"
+  info "${C_B}backed up${C_0} ${have[*]} to $out ($(hsize "$(stat -c %s -- "$out")"), mode 600). It holds your API key and secrets: keep it private"
+}
+cmd_restore() {  # FILE: put a backup back (models and services must be stopped)
+  local f=$sel st py i
+  [[ -n $f && -f $f ]] || die "say which backup: '$PROG restore FILE'"
+  running_scan
+  ((${#R_FILES[@]})) && die "stop the models first ('$PROG stop all'); nothing was changed"
+  for i in webui searxng gateway; do svc_alive "$i" && die "stop Open WebUI and the gateway first ('$PROG webui stop', '$PROG gateway stop'); nothing was changed"; done
+  py=$(helper_python) || die "restore needs llmserver's runtime: '$PROG install runtime'"
+  lhome_init
+  st=$(mktemp -d "$lhome/tmp/restore.XXXXXX")
+  # only plain files and folders, and only the items a backup holds; checked before anything is unpacked
+  py_env "$py" -I -c 'import sys, tarfile
+src, dest, items = sys.argv[1], sys.argv[2], sys.argv[3:]
+with tarfile.open(src) as t:
+    ms = t.getmembers()
+    if not any(m.name in (".llmserver-backup", "./.llmserver-backup") for m in ms): sys.exit(1)
+    for m in ms:
+        n = m.name[2:] if m.name.startswith("./") else m.name
+        if n in ("", ".", ".llmserver-backup"): continue
+        if not (m.isfile() or m.isdir()) or not any(n == i or n.startswith(i + "/") for i in items): sys.exit(1)
+    t.extractall(dest, filter="data")' "$f" "$st" "${BACKUP_ITEMS[@]}" || { rm -rf -- "$st"; die "$f is not an llmserver backup, or it holds other files; nothing was changed"; }
+  if ((!yes)); then
+    [[ -t 0 && -t 2 ]] || { rm -rf -- "$st"; die "this replaces your settings and data; add --yes to do it without a question"; }
+    printf 'Replace the settings, the menu, the key, the records and the Open WebUI data with the backup (%s)? [y/N]: ' "$(cat "$st/.llmserver-backup" 2>/dev/null)" >&2
+    IFS= read -r REPLY || REPLY=""; [[ ${REPLY,,} == y* ]] || { rm -rf -- "$st"; info "nothing was changed"; return 0; }
+  fi
+  for i in "${BACKUP_ITEMS[@]}"; do
+    [[ -e $st/$i ]] || continue
+    rm -rf -- "${lhome:?}/$i"; mkdir -p "$(dirname -- "$lhome/$i")"; mv -- "$st/$i" "$lhome/$i"
+  done
+  chmod 600 "$env_file" "$key_file" "$config_dir"/*-secret 2>/dev/null || true
+  rm -rf -- "$st"
+  log_write info "restore: from $f"
+  info "${C_B}restored${C_0} from $f. The model files stay in their caches (on another computer they download again at the first start); '$PROG doctor' checks the result"
+}
+
 # ---- main --------------------------------------------------------------------
 load_config
 if [[ $cmd == config ]]; then
-  if [[ $sub == list ]]; then validate_config   # 'list' also reports a problem; set/unset/edit work on a broken file to correct it
+  if [[ $sub == list ]]; then   # 'list' also reports a problem; set/unset/edit work on a broken file to correct it
+    for _w in "${ENV_WARNINGS[@]}"; do warn "$_w"; done
+    validate_config
   else [[ -n $MIGRATE_BLOCKED ]] || lhome_init; MUTATING=1; fi
   cmd_config; exit 0
 fi
@@ -9530,6 +10129,8 @@ case $cmd in
   gateway) MUTATING=1; cmd_gateway; exit 0 ;;
   webui) MUTATING=1; cmd_webui; exit 0 ;;
   autostart) MUTATING=1; cmd_autostart; exit 0 ;;
+  backup) cmd_backup; exit 0 ;;
+  restore) MUTATING=1; cmd_restore; exit 0 ;;
 esac
 if [[ -r $last_file ]]; then
   IFS= read -r last < "$last_file" || last=""
@@ -9594,9 +10195,9 @@ fi
 # ---- will it run here? -------------------------------------------------------
 FIT_FLAGS=()
 case $ENGINE in
-  llama) read -ra FIT_FLAGS <<<"${CFG[LLAMA_FLAGS]} $EXTRA" ;;
-  vllm) read -ra FIT_FLAGS <<<"${CFG[VLLM_FLAGS]} $EXTRA" ;;
-  ollama) read -ra FIT_FLAGS <<<"$EXTRA" ;;
+  llama) split_words "${CFG[LLAMA_FLAGS]} $EXTRA" FIT_FLAGS ;;
+  vllm) split_words "${CFG[VLLM_FLAGS]} $EXTRA" FIT_FLAGS ;;
+  ollama) split_words "$EXTRA" FIT_FLAGS ;;
 esac
 FIT_FLAGS+=("${pass[@]}")
 draft_info
@@ -9841,7 +10442,11 @@ else
   ports_set "$SPEC" "$PORT"
   wait_ready && rc=0 || rc=$?
   case $rc in
-    1) fail_start "the $ENGINE server exited before it became healthy (log: $S_LOG; last lines: $(tail -n 3 "$S_LOG" 2>/dev/null | tr '\n' ' ' | cut -c1-300))" ;;
+    1) hint=""
+       if [[ $ENGINE == vllm ]] && tail -n 80 "$S_LOG" 2>/dev/null | grep -qiE 'KV cache|cache blocks|out of memory'; then
+         hint=". vLLM had too little GPU memory for the KV cache (llmserver's estimate was too low): start it with a smaller --ctx, or give it more of the GPU with '-- --gpu-memory-utilization 0.9'"
+       fi
+       fail_start "the $ENGINE server exited before it became healthy (log: $S_LOG; last lines: $(tail -n 3 "$S_LOG" 2>/dev/null | tr '\n' ' ' | cut -c1-300))$hint" ;;
     2) fail_start "the $ENGINE server was not healthy after ${CFG[READY_TIMEOUT]}s (LLMSERVER_READY_TIMEOUT; log: $S_LOG)" ;;
     3) fail_start "port $PORT is answering, but not from the server that was just started" ;;
     4) fail_start "the $ENGINE server accepted a request without the API key, so it was stopped rather than left open. If this build takes the key another way, pass it after '--' (for example --api-key-file) or set LLMSERVER_AUTH=none" ;;
@@ -9881,6 +10486,7 @@ url="http://$(hostport "$(client_host "$HOST")" "$PORT")/v1"
 info "${C_B}ready${C_0}: $MODEL via $ENGINE at $url (model id \"$(model_id "$ENGINE" "$MODEL")\"; ${meas:+uses $(gb "$(usage_total "$meas")") of VRAM; }log $S_LOG)"
 note "running: $SPEC port=$PORT pid=${S_PID:-daemon} gpus=${PLACE_IDX[*]:-none} est=${est:-?} measured=${meas:-?} ctx=$CTX"
 running_scan; info "${#R_FILES[@]} model(s) running; '$PROG ps' lists them, '$PROG capacity' shows the room left"
+[[ -n ${_LLMSERVER_SERVICE-} ]] || gateway_menu_refresh   # a new menu model, or a new check record
 if ((${#SECRET_ENV[@]})); then info "clients need the API key in $key_file; '$PROG env $SPEC' prints ready-made exports"; fi
 if ((foreground)) && [[ -n $S_PID ]]; then
   # stay attached: show the server's output and stop it on Ctrl-C

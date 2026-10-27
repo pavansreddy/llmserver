@@ -1,6 +1,6 @@
 # llmserver Trust — design for model and skill supply-chain security
 
-Status: **complete in 2.0.0; 2.1.0 moves every file into one folder (see below).**
+Status: **current to 2.7.3.** The table lists every release; the implementation notes below it say what was built and how it differs from the original design (sections 1 to 15, kept as written for 1.7.0).
 
 | Release | Contents |
 |---|---|
@@ -20,6 +20,43 @@ Status: **complete in 2.0.0; 2.1.0 moves every file into one folder (see below).
 | 2.6.0 | The gateway, and Open WebUI as a managed, sandboxed add-on |
 | 2.7.0 | Hybrid RAG with a pinned reranker; web search through a private, pinned SearXNG |
 | 2.7.1 | `webui_reranker best`: bge-reranker-v2-m3 on llama.cpp through the gateway's `/v1/rerank` |
+| 2.7.2 | Review fixes: sandbox gets its own PID namespace and no session sockets; clean engine environment; trusted system settings file; Open WebUI's first account on loopback; `AUTH=key` everywhere; time+size check with rehash; gateway on demand, limits and `/metrics`; HTTPS for Open WebUI with your certificate; `backup`/`restore`; `models prune` |
+| 2.7.3 | `models share on\|off`: other tools use the private model store through `HF_HUB_CACHE` and `OLLAMA_MODELS` in the login files; `uninstall --purge-models` keeps other tools' files in `models/` |
+
+### Implementation notes (2.7.3): sharing the private model store
+
+The request was to move `~/.cache`, `~/.config`, `~/.local`, `~/.ollama`, `~/.agents` and `~/.claude` into the home and link them back. Rejected: those folders hold every program's settings, keys and caches. In the home they would fall under `uninstall`, `restore` and the "llmserver owns everything here" rule, and one wrong bind would show them to a sandbox. llmserver already links only what it owns (one link per skill). What other tools actually need is the model files, and two variables give exactly that.
+
+- **Mechanism:** a block between `# >>> llmserver models share >>>` and `# <<< llmserver models share <<<` in `~/.profile`, in `~/.bash_profile` or `~/.bash_login` when bash reads that file instead (skipped when it sources `~/.profile`), and in `~/.zshenv` for zsh. Plain POSIX `export` lines with single-quoted paths; a home path with a quote is refused. No file in the home is sourced by a login shell, so a write to the home cannot become code in every login.
+- **Safe when stale:** each line is guarded by `[ -d PATH ]`, so after an uninstall or a move it does nothing. `uninstall` removes the block; `doctor` warns when the block points outside the current home or the store is `shared`.
+- **Careful edits:** written to a temporary file in the same folder and renamed, with the old mode; through a link to its target (dotfile managers); unchanged files are not rewritten; an unfinished block (begin without end) is kept as it is, so no line that may be the user's is dropped.
+- **User values win:** a variable the user set (shell or settings file) is not written, as llmserver itself already gives it priority.
+- **Only with `MODEL_STORE=private`:** with `shared`, llmserver and other tools already use the standard caches; `on` says so and changes nothing.
+- **Integrity:** other tools can now change files in `models/`. The time+size check with rehash (2.7.2) catches it at the next start. `uninstall --purge-models` no longer deletes the whole `models/` folder: it deletes the recorded downloads (as with the shared caches) and empty folders, and keeps other tools' files.
+- **Not done (KISS):** links, `environment.d` (no conditions, so a stale path would re-create folders), systemd unit overrides, fish. The manual says how to set the variable for a service.
+
+### Implementation notes (2.7.2): fixes from the review
+
+Principle kept: one script, no Docker, no sudo; every download pinned and checked; safe by default. Each fix is the smallest change that closes the gap.
+
+- **Sandbox escape through `/proc` closed:** without `--unshare-pid` the engine saw every process of the user and could open `/proc/PID/root/...` (the outer filesystem, home included) and `/proc/PID/environ`. All three sandboxes (engines, Open WebUI, SearXNG) now come from one `sandbox_base` with `--unshare-pid`. `sandbox_works` tests that flag too. Stopping still signals the process group: bwrap stays the group leader in the host namespace, and the server inside keeps that group.
+- **Session sockets hidden:** a read-only bind does not stop `connect()` on a Unix socket, so `/run/user/UID` (and `XDG_RUNTIME_DIR` when it is elsewhere) is a tmpfs: no D-Bus session bus (and so no `systemctl --user` escape), no SSH agent, no keyring. Still reachable, and stated: abstract sockets (shared network namespace) and the system D-Bus. bwrap is called by its full path (the services start with a short `PATH`).
+- **Clean engine environment:** engines inherited the whole shell environment (cloud keys, tokens, `SSH_AUTH_SOCK`). Now an allowlist (`ENGINE_ENV_RE`: `PATH`, `HOME`, locale, `LD_LIBRARY_PATH`, and the prefixes of GPU and engine programs) plus every variable of the settings file. With or without the sandbox. The engine's own API key stays in its environment (stated as a limit).
+- **System settings file:** `/etc/llmserver_env` can name programs (`*_SOURCE`) and set `LD_PRELOAD`. It was read regardless of its owner. Now it is used only when owned by root or the user, not writable by group or others, and in a folder that others cannot change (or a sticky one). `SECURITY_FLOOR` keeps its stricter root-only rule.
+- **First Open WebUI account:** the first account becomes the admin, and the default host is `0.0.0.0`. While the user table is empty (or cannot be read), `webui start` binds `127.0.0.1` and says how to create the account (locally or through `ssh -L`); `webui restart` then opens it to the network. No dependency on Open WebUI internals beyond the `user` table that `status` already read.
+- **`AUTH=key` means every client:** the gateway accepted loopback clients without a key. Now with `AUTH=key` it needs the key from everyone (constant-time comparison); Open WebUI gets the key as its connection key (`OPENAI_API_KEY`, and `openai.api_keys[0]` in its database through the same "only when llmserver's value changed" rule; other connections the admin added are kept) and for the external reranker. `doctor` warns when other accounts can log in and `AUTH` is not `key`.
+- **Integrity at start:** records now keep each file's modification time. A start compares size and time; a new time with the same size rehashes that file and passes (and updates the record) only when the hash matches. This catches a same-size swap at the next start, not only at `trust verify`. Import refreshes the times of the placed files; local GGUF files use the same rule (a `touch` no longer asks again).
+- **`--yes` no longer travels:** `chat MODEL --yes` and the best-reranker start called the start with `--yes`, which also accepted security warnings. Both now start without it: a model with open warnings needs the user's own start.
+- **Script checksum:** `doctor` prints the SHA-256 of the running script; the manual tells the user to check it against the release's `SHA256SUMS`. (Signed releases and self-update stay out of this line, by choice.)
+- **Honest locks:** the manual now says that the vLLM, Open WebUI, SearXNG and garak locks are made at the first install (trust on first use, then fixed).
+- **Functional fixes:** `upgrade` without a component updates only what is installed (it installed every engine); `webui stop` stops only the services `webui start` started (a gateway the user started stays); a bare `llama:REPO` means Q4_K_M in `check` as in the security check (the size lookup took the smallest quant), with a message that lists the quants; vLLM also gets small text files in subfolders (`1_Pooling/`, processors); looking at an Ollama model (`ps`, `capacity`) gives its log its old time back, so it does not reset the idle time; MIG GPUs give a warning; a vLLM start that fails for KV-cache memory says so; llmserver calls itself as `"$BASH" "$SELF"` (works without execute permission); `config set` names the other setting when that one is broken; menu flags accept '...' and "..." for values with spaces (`split_words`/`join_words`; no `eval`).
+- **Gateway:** optional models on demand (`GATEWAY_AUTOLOAD`, default off): it lists the menu models that have a check record (a file written by llmserver whenever the menu or the records change) and starts one with llmserver itself (`_LLMSERVER_NO_FETCH=1`: never a download, never a question; eviction as `EVICT`, `ask` acts as `never`); `GATEWAY_IDLE_STOP` minutes stops only what it started. One start at a time. Its environment is the engine allowlist plus `HOME`, `LLMSERVER_HOME` and the proxy variables. Also: 64 concurrent requests (then 503), a 60 s idle timeout for clients, `Content-Length` checks, and `/metrics` (requests, in flight, running, started by the gateway; no message content).
+- **HTTPS for Open WebUI:** with `WEBUI_TLS_CERT` and `WEBUI_TLS_KEY`, Open WebUI runs as `python -m uvicorn open_webui.main:app --ssl-certfile --ssl-keyfile --forwarded-allow-ips 127.0.0.1` (the same app `open-webui serve` starts; `FROM_INIT_PY=true` as `serve` sets it). Your certificate only: no local CA (keeps it small). The two files are bound read-only into the sandbox.
+- **`backup`/`restore`:** one tar (mode 600) of what cannot be downloaded again: settings, `config/`, `trust/records`, ports, pins, skills, Open WebUI data (its SQLite database through SQLite's backup API). `restore` refuses a file with any member outside that list, any link or device, and works only while models and services are stopped.
+- **`models prune`:** deletes the files of older commits that llmserver downloaded (from `state/downloads`), keeping every path that a current record or a running model's record uses (`trustpy keep-paths`), and blobs that another snapshot links to (the uninstall logic). Older records go too.
+- **Speed:** `list`, `check` and `capacity` check every menu record in one Python start (`enforce-many`), instead of one per entry.
+- **Not done, on purpose (KISS):** several copies of one model, per-user keys and rate limits, a local certificate authority, self-update and signed releases, metrics beyond counters, MCP tools.
+- **Tests:** real runtime install, real Hugging Face (vLLM file selection, default quant message, no-fetch refusal), a stand-in llama.cpp and Open WebUI, and a stand-in bubblewrap that records its arguments (bubblewrap was not available): engine environment, sandbox arguments, on-demand start and idle stop, `AUTH=key` on the gateway, first Open WebUI start on loopback and the restart to the network, a touched and a changed model file, quoted menu flags, backup and restore (and a refused file), prune with two simulated commits. `bash -n`, shellcheck (warning level, clean) and a parse of every embedded Python program.
 
 ### Implementation notes (2.7.0 and 2.7.1): documents and web search
 
@@ -211,11 +248,10 @@ llmserver downloads three kinds of artifact from the internet:
 | `SECURITY` | **standard** \| strict | See the level table in section 5 |
 | `SECURITY_FLOOR` | **unset** \| standard \| strict | Read **only** from `/etc/llmserver_env`. The user's level cannot go below it, so an administrator can enforce `strict` |
 | `ALLOW_PICKLE` | **off** \| on | Allows pickle-only vLLM repositories (their pickle scan must still be clean) |
-| `LOCK_MODELS` | **ask** \| on \| off | On first download, rewrite the menu entry to `repo@commit` |
+| `LOCK_MODELS` | **off** \| ask \| on | On first download, rewrite the menu entry to `repo@commit` (built with `off` as the default; see the 1.7.0 notes) |
 | `SKILLS` | **ask** \| on \| off | Whether setup offers the `hf-cli` and `llmserver` skills |
-| `SCANNERS` | **auto** \| off | Use `clamscan`, `modelscan`, `semgrep` and `gitleaks` if they are on PATH |
+| `SCANNERS` | **auto** \| off | Use `clamscan`, `modelscan` and `gitleaks` if they are on PATH (semgrep was dropped: its rules come from a network registry) |
 | `TRUST_SIGNERS` | **unset** \| file | ssh `allowed_signers` file; when set, `import` requires a valid signature |
-| `LLMSERVER_FLASHINFER_INDEX` (path) | exists | (1.6.1) |
 
 `VERIFY=require` (the existing content-hash check after a download) stays. Under `strict` it cannot be turned off.
 
@@ -366,8 +402,9 @@ The manual lists every rule with its reason. `--json` reports every finding.
 **Bundle:** an uncompressed tar (weights don't compress) containing:
 
 ```
-manifest.json            # bundle id, created, llmserver version, creator, artifacts, every file: path, size, sha256
-manifest.json.sig        # optional: ssh-keygen -Y sign -n llmserver-bundle
+SHA256SUMS               # the SHA-256 of every other member (as built in 1.9.0)
+SHA256SUMS.sig           # optional: ssh-keygen -Y sign -n llmserver-bundle, over SHA256SUMS
+manifest.json            # bundle id, created, llmserver version, creator, artifacts, where each file goes
 records/…                # the approval records
 blobs/sha256/<hash>      # content-addressed files
 engines/…                # with --with-engines: pinned archives, uv, Python builds, locked wheels
@@ -376,7 +413,7 @@ engines/…                # with --with-engines: pinned archives, uv, Python bu
 - **Export** includes only artifacts with an `approved` record (under standard, `accepted` is enough, with a note).
 - **Import:**
   1. checks the signature, when `TRUST_SIGNERS` is set (required under strict);
-  2. extracts with the `data` filter into staging and checks every SHA-256 against the manifest;
+  2. extracts with the `data` filter into staging and checks every SHA-256 against `SHA256SUMS`;
   3. only then places the files: the HF cache layout (`blobs/` and `snapshots/<commit>/`) or the Ollama blob store and manifest;
   4. writes the records, marked `imported` with the bundle id.
 
@@ -393,7 +430,7 @@ engines/…                # with --with-engines: pinned archives, uv, Python bu
 
   Results go into the record. llmserver installs none of them.
 - **Behaviour testing (later, optional):** `llmserver eval NAME` runs garak from its own hash-locked venv, installed on request, plus a small built-in prompt-injection probe. Results are attached to the record as information. llmserver does not claim to detect backdoors.
-- **Sandbox (later):** `systemd-run --user` or bubblewrap: read-only folders except the caches and state, private `/tmp`, no privilege escalation, and loopback networking for engines serving offline. Without user namespaces it reports that and runs as today.
+- **Sandbox:** built in 2.0.0 with bubblewrap only (see the 2.0.0 and 2.7.2 notes); the network stays shared, because the server must listen on the host's port.
 
 ## 11. Record format (version 1)
 
@@ -456,6 +493,7 @@ The fake Hub (`fakehub.py`) gains per-file `security`, commits, `auto_map` and s
 | **1.9.0** | `export`/`import`/`install --from`, signatures, `versions --sbom`, optional scanners |
 | **2.0.0** | Sandbox, `eval` (garak) |
 | **2.1.0** | One folder (`~/.llmserver`), migration, movable home, sandbox hides the home |
+| **2.1.1 to 2.7.2** | See the table at the top of this document |
 
 Each release updates `document.md` (ASD-STE100):
 - a new chapter "Trust: security of models and skills";
@@ -469,8 +507,8 @@ Each release updates `document.md` (ASD-STE100):
 1. `SECURITY=standard`; `strict` available, and enforceable with `SECURITY_FLOOR`.
 2. Pickle-only vLLM repositories are refused (`ALLOW_PICKLE=off`).
 3. llama.cpp switches to the pinned `hf` download plus `-m`.
-4. `LOCK_MODELS=ask`.
-5. The sandbox comes after 1.9.
+4. `LOCK_MODELS=ask` (built as `off`: each record already locks the commit).
+5. The sandbox comes after 1.9 (built in 2.0.0, hardened in 2.7.2).
 6. Approval records are required under `strict`; under `standard` they are written automatically.
 7. Air-gapped export and import are included (1.9).
 8. Bundle signatures with `ssh-keygen -Y`, required under `strict` when importing.
