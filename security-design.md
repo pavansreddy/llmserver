@@ -1,6 +1,6 @@
 # llmserver Trust — design for model and skill supply-chain security
 
-Status: **current to 3.1.0 (cluster edition).** 2.x is the line for one computer; 3.x adds Slurm, coding agents, models on demand, MCP, HTTPS and self-update. The table lists every release; the implementation notes below it say what was built and how it differs from the original design (sections 1 to 15, kept as written for 1.7.0).
+Status: **current to 2.7.4.** The table lists every release; the implementation notes below it say what was built and how it differs from the original design (sections 1 to 15, kept as written for 1.7.0).
 
 | Release | Contents |
 |---|---|
@@ -21,41 +21,8 @@ Status: **current to 3.1.0 (cluster edition).** 2.x is the line for one computer
 | 2.7.0 | Hybrid RAG with a pinned reranker; web search through a private, pinned SearXNG |
 | 2.7.1 | `webui_reranker best`: bge-reranker-v2-m3 on llama.cpp through the gateway's `/v1/rerank` |
 | 2.7.2 | Review fixes: sandbox gets its own PID namespace and no session sockets; clean engine environment; trusted system settings file; Open WebUI's first account on loopback; `AUTH=key` everywhere; time+size check with rehash; gateway on demand, limits and `/metrics`; HTTPS for Open WebUI with your certificate; `backup`/`restore`; `models prune` |
-| 2.8.0 | Environment assessment and bootstrap self-test (`doctor`), `launch` for coding agents, models on demand, `upgrade self` and `install.sh` |
-| 2.8.1 | `qr`, `open`, shell completion |
-| 2.9.0 | Profiles, voice input (pinned Whisper), gateway `/metrics`, embedding servers |
-| 2.10.0 | MCP tools for Open WebUI (mcpo, sandboxed), HTTPS for Open WebUI (local CA or your certificate) |
-| 3.0.0 | Slurm: models as jobs, the login-node gateway routes to compute nodes |
-| 3.1.0 | 3.0.0 joined with 2.7.2 to 2.7.4 (the security review fixes, `backup`/`restore`, `models prune`/`share`, SkillSpector, update diffs); the 3.0.0 gateway hardened |
 | 2.7.4 | Skills: NVIDIA SkillSpector as an optional scanner (static by default; `skills_review MODEL` runs its LLM review on a local model through the gateway); `skills update` shows a diff and asks |
 | 2.7.3 | `models share on\|off`: other tools use the private model store through `HF_HUB_CACHE` and `OLLAMA_MODELS` in the login files; `uninstall --purge-models` keeps other tools' files in `models/` |
-
-### Implementation notes (3.1.0): the two lines joined
-
-3.0.0 (built from 2.7.1) and 2.7.2–2.7.4 (also from 2.7.1) changed some of the same parts in different ways. The join keeps 3.0.0's design where both built the same feature, and applies the 2.7.x security fixes to it.
-
-- **Gateway:** 3.0.0's program (models on demand with the user's environment, Anthropic routes, token metrics, `/v1/rerank`, Slurm backends) with the 2.7.2 hardening added: `AUTH=key` needs the key from loopback clients too (`GW_KEY_LOCAL`), constant-time key comparison (`hmac.compare_digest`), at most 64 requests at once (503 after that), a 60 s idle timeout for clients, `Content-Length` validation and 411 for chunked requests, the in-flight counters under a lock, and `/health` without the model count. llmserver is started as `bash SCRIPT`, so the gateway's starts and stops work without execute permission. 2.7.2's own autoload (menu file, `_LLMSERVER_NO_FETCH`) is not kept: 3.0.0's trust-gate guard (`_LLMSERVER_SERVICE=gateway`) does the same.
-- **HTTPS:** 3.0.0's relay with a local CA (or your certificate). 2.7.2's direct uvicorn TLS is not kept. The first-account rule of 2.7.2 applies to the relay too: until the admin account exists, Open WebUI and the relay bind `127.0.0.1`.
-- **Open WebUI:** 3.0.0's start (tools, voice, relay) plus 2.7.2: the gateway key as its connection key (`OPENAI_API_KEY` and `openai.api_keys[0]`, next to 3.0.0's `tool_server.connections` merge), the record's `GATEWAY_STARTED` and `FIRST`, and `webui stop` that keeps a gateway the user started.
-- **Sandboxes:** every sandbox (engines, Open WebUI, SearXNG, mcpo, the HTTPS relay) now comes from `sandbox_base`: own PID namespace, no session sockets (`/run/user/UID`, `XDG_RUNTIME_DIR`). 3.0.0 built the mcpo and relay sandboxes by hand without these.
-- **Self-calls:** 3.0.0 ran `"$0"` (needs execute permission, breaks under another name) in `config` checks, Slurm submits and the self-test; all use `"$BASH" "$SELF"` now, and Slurm job scripts run `bash SCRIPT`.
-- **Everything else from 2.7.2–2.7.4 merged without conflict:** clean engine environment, trusted `/etc/llmserver_env`, time+size check with rehash, `--yes` that does not travel, quoted menu flags, `upgrade` of installed components only, `backup`/`restore`, `models prune`, `models share`, SkillSpector and the skills review, the update diff.
-- **Tests:** the 2.7.x feature tests and the 3.0.0 gateway, autoload and Slurm paths on the joined script (see the manual's test status); the doctor self-test compiles every embedded program.
-
-### Implementation notes (2.8.0 to 3.0.0)
-
-- **Assessment and self-test (`doctor`):** read-only. Platform, tools, the things not required, GPU (driver, the CUDA version from `nvidia-smi` or the driver table), storage (writable, free, network filesystem), network (one HEAD request per download host, in parallel, 5 s, through the configured proxy and mirrors), cluster, security, modules. The self-test compiles every embedded Python program extracted from the script file itself (`<<'TRUSTPY'`, `GATEWAYPY`, `CHATPY`, `TLSPY`, `PY`), runs `bash -n` on the script, compares engine checksums, checks the SearXNG content hash and the pinned model files. `NOT READY` gives exit status 1; `setup` runs the platform part first.
-- **`launch`:** the tool must be on PATH; llmserver never installs it or writes its config. Claude Code: `ANTHROPIC_BASE_URL` = the gateway, `ANTHROPIC_API_KEY` removed, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; the gateway routes `/v1/messages` and `/v1/messages/count_tokens` (llama.cpp b11798 serves both, verified in the binary and with the real Claude Code). Codex: `-c` provider overrides with `wire_api="responses"` (Chat Completions support was removed from Codex in February 2026). OpenCode: a temporary config file (`OPENCODE_CONFIG`), deleted after the run.
-- **Models on demand:** the gateway starts a menu model with `llmserver SPEC` under `_LLMSERVER_SERVICE=gateway`; in that mode the trust gate refuses (exit 4) any model without a current accepted record, so the gateway never downloads or answers a question; no `--yes`, so eviction follows `EVICT` without a terminal. Records carry `BY=gateway`; the idle stopper stops only those. The user's environment is kept for the starts in `state/services/gateway.env` (600), deleted on stop.
-- **Self-update:** GitHub's asset digest (API) and `SHA256SUMS` must both match; with `RELEASE_SIGNERS` set in the script, `SHA256SUMS.sig` must verify with `ssh-keygen -Y verify` (namespace `llmserver`, principal `llmserver-release`); the new script must pass `bash -n` and report the tag's version; the old script is kept for `rollback self`. The release workflow signs when the `RELEASE_SSH_KEY` secret is set. Until a maintainer key is added, only checksums are checked, and the messages say so.
-- **QR codes:** `segno` 1.6.6 (pure Python, no dependencies) added to the hash-locked helper packages.
-- **Profiles:** copies of `llmserver.env` and the menu only (no key, records, models); `use` keeps the replaced pair as `previous` (so `use previous` swaps).
-- **Voice:** faster-whisper "base" (Systran/faster-whisper-base, CTranslate2 `model.bin`, not pickle) at a pinned commit, four files SHA-256-checked, offline; text to speech stays in the browser (no server download).
-- **Metrics:** in-memory counters in the gateway; token counts from the last 16 KB of each reply (`prompt_tokens`/`completion_tokens`, or `input_tokens`/`output_tokens`); no content; same access rule as the API.
-- **MCP:** `config/mcp.json` (600). Command servers run under mcpo 0.0.20, whose packages are resolved as of 2026-03-01 (`--exclude-newer`; the newest MCP SDK renamed an import mcpo uses — found by test), hash-locked; mcpo listens on 127.0.0.1 with `--api-key` and `--strict-auth`; bubblewrap: read-only system, empty home except `webui/mcp/home`, the server's program folder and the paths in its arguments bound read-only, network allowed. Open WebUI gets `tool_server.connections` entries with ids `llmserver-NAME`, no `access_grants` (admin-only); on changes, the admin's own entries and the grants on llmserver's entries are kept.
-- **HTTPS:** a stdlib relay (`TLSPY`), threaded: TLS 1.2+, ALPN http/1.1, bytes passed through (websockets work); plain HTTP gets 301 to https, except `/llmserver-ca.crt`. Open WebUI binds 127.0.0.1 on a free port; secure cookies on. Certificates: P-256 local CA (10 years, pathlen 0) and a server certificate (825 days) for the host names and addresses, renewed when they change or 30 days before expiry; or the user's certificate and key.
-- **Slurm:** the login node checks and downloads the model, sizes the GPU request from the memory plan and `SLURM_GPU_MEM`, writes and submits the job script. In the job, `_LLMSERVER_SLURM=1` gives a job-local state folder (`state/slurm/JOB`), host 0.0.0.0, `AUTH=key`, no automatic installs; records carry `NODE`. The gateway also reads `state/slurm/*/running`, connects to the record's node, and skips the local pid check for other nodes. Not done (documented): Apptainer as a sandbox (needs an image; host engines depend on host libraries), multi-node models (vLLM with Ray).
-- **Tests:** `v28_suite` 48 cases, `v30_suite` 77 cases, with real Open WebUI, mcpo, openssl and Claude Code where stated in the manual's test status.
 
 ### Implementation notes (2.7.4): skill security in layers
 
