@@ -2,7 +2,7 @@
 
 **Run local LLMs on Linux with one command. Every download is checked, every engine is sandboxed, and each model gets its own OpenAI-compatible endpoint.**
 
-![version](https://img.shields.io/badge/version-2.7.4-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+![version](https://img.shields.io/badge/version-2.7.5-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 llmserver is a single bash script. It installs and runs **llama.cpp**, **vLLM** and **Ollama** for you. Before a model starts, llmserver:
 
@@ -73,7 +73,7 @@ Download `llmserver` and `SHA256SUMS` from the [latest release](../../releases/l
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS                  # must show: llmserver: OK
 chmod +x llmserver && mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
-llmserver --version                                       # llmserver 2.7.4
+llmserver --version                                       # llmserver 2.7.5
 ```
 
 ### Set up
@@ -125,16 +125,15 @@ llmserver webui
 
 The first run installs Open WebUI 0.12.3 (about 2.5 GB) and starts it with the gateway. Then:
 
-1. **Create the admin account.** Until the first account exists, Open WebUI listens on `127.0.0.1:3000` only, so nobody on the network can take the admin account first.
-   - On the server, open `http://127.0.0.1:3000`.
-   - From another computer, run `ssh -L 3000:127.0.0.1:3000 USER@HOST` first, then open the same address.
-2. **Open it to the network:** `llmserver webui restart`. It now listens on `0.0.0.0:3000`. If other computers still cannot connect, open the port in the firewall.
-3. **Add people** in *Admin Panel → Users*, or turn on sign-ups (new accounts wait for your approval).
-4. **Start models** with `llmserver MODEL`. Open WebUI shows every running model at once.
+1. **Create the admin account.** The first start asks for it in the terminal (email, name, password) and creates it before Open WebUI listens, so it opens on `0.0.0.0:3000` right away. If other computers cannot connect, open the port in the firewall.
+   - Skipped it, or started without a terminal? Open WebUI stays on `127.0.0.1:3000` until the account exists, so nobody on the network can take it first. Run `llmserver webui admin`, or create it in the browser on the server and run `llmserver webui restart`.
+2. **Add people** in *Admin Panel → Users*, or turn on sign-ups (new accounts wait for your approval).
+3. **Start models** with `llmserver MODEL`. Open WebUI shows every running model at once.
 
 | Task | Command |
 |---|---|
 | Status / stop | `llmserver webui status` · `llmserver webui stop` |
+| Create the admin account (no accounts yet) | `llmserver webui admin` |
 | Apply changed `webui_*` settings | `llmserver webui restart` |
 | This computer only | `llmserver config set webui_host 127.0.0.1` |
 | Another port | `llmserver config set webui_port 8443` |
@@ -219,6 +218,7 @@ Chat commands: `/think` (show reasoning), `/reasoning low|medium|high|none`, `/s
 ```bash
 llmserver model add vllm:Qwen/Qwen3-8B                        # checks that the name exists
 llmserver model add llama:ORG/REPO-GGUF:Q4_K_M -- -c 65536    # with engine flags
+llmserver model add llama:google/gemma-4-E4B-it-qat-q4_0-gguf  # no Q4_K_M, only Q4_0: added as ...:Q4_0
 llmserver model list
 llmserver model rm 4 [--purge]                                # --purge also deletes its files
 llmserver model edit                                          # edit in $EDITOR, then validated
@@ -236,7 +236,7 @@ Quote values that have spaces. A model you start by name is added to the menu au
 
 | Name | Engine |
 |---|---|
-| `llama:ORG/REPO[:QUANT][@COMMIT]` | llama.cpp (Q4_K_M by default) |
+| `llama:ORG/REPO[:QUANT][@COMMIT]` | llama.cpp (Q4_K_M by default; `model add` uses the only quant of a repo without Q4_K_M) |
 | `vllm:ORG/REPO[@REVISION]` | vLLM |
 | `ollama:NAME[:TAG]` · `ollama:hf.co/ORG/REPO[:QUANT]` | Ollama |
 | `~/models/file.gguf` | llama.cpp, from your disk |
@@ -678,7 +678,7 @@ Start with `llmserver doctor`, then `llmserver doctor --fix`. After a crash or p
 
 | Symptom | Fix |
 |---|---|
-| Open WebUI only on `127.0.0.1` | First start: create the admin account, then run `llmserver webui restart`. Also check `llmserver config get webui_host` |
+| Open WebUI only on `127.0.0.1` | No admin account yet: `llmserver webui admin`. Also check `llmserver config get webui_host` |
 | Network clients can't connect | Open the port in the firewall. Check `host` (models), `webui_host` and `gateway_host` |
 | Clients get 401 | Send the key: `llmserver env MODEL` |
 | `security warning … no terminal` (exit 4) | Run it in a terminal, or add `--yes` |
@@ -688,7 +688,7 @@ Start with `llmserver doctor`, then `llmserver doctor --fix`. After a crash or p
 | `needs these models stopped … no terminal` | Use `--evict` or `--offload`, or stop a model |
 | `will not run well enough` | `llmserver check MODEL`, then use a recommended quant or context |
 | vLLM: too little memory for the KV cache | Use a smaller `--ctx`, or add `-- --gpu-memory-utilization 0.9` |
-| `has no Q4_K_M GGUF` | Add a quant from the list shown, for example `:Q8_0` |
+| `no Q4_K_M GGUF in ...` | Use the name shown, for example `llama:ORG/REPO-GGUF:Q4_0`; `model add` picks the quant itself when the repo has only one |
 | `N%-on-cpu` in `ps` (Ollama) | Stop other models, then `llmserver MODEL --restart` |
 | `needs glibc 2.39` | `llmserver config set llama_build vulkan`, or use your own engine |
 | `bubblewrap does not work here` | Allow user namespaces, or set `sandbox auto` |

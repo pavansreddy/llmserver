@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-readonly PROG=llmserver VERSION=2.7.4
+readonly PROG=llmserver VERSION=2.7.5
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "$PROG: bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 1
 fi
@@ -305,7 +305,7 @@ Usage:
                               talk to a model in the terminal (answers stream as they come;
                               /help lists the chat commands). Offers to start MODEL if it is not
                               running. With MESSAGE, or a pipe, it answers once and exits
-  $PROG webui [start|stop|restart|status]
+  $PROG webui [start|stop|restart|status|admin]
                               Open WebUI, a web chat for people on the network (installed on
                               first use, about 2.5 GB): accounts, every running model, chats.
                               Documents: hybrid search (keywords + meaning) and a reranker
@@ -650,7 +650,7 @@ fi
 if [[ $cmd == gateway || $cmd == webui ]]; then
   sub=${positional[0]-}; positional=("${positional[@]:1}")
   [[ -n $sub ]] || { [[ $cmd == webui ]] && sub=start || sub=status; }
-  if [[ $cmd == webui ]]; then [[ $sub =~ ^(start|stop|restart|status)$ ]] || die "say what to do: '$PROG webui start|stop|restart|status'"
+  if [[ $cmd == webui ]]; then [[ $sub =~ ^(start|stop|restart|status|admin)$ ]] || die "say what to do: '$PROG webui start|stop|restart|status|admin'"
   else [[ $sub =~ ^(start|stop|status)$ ]] || die "say what to do: '$PROG gateway start|stop|status'"; fi
 fi
 if [[ $cmd == config || $cmd == key || $cmd == autostart ]]; then
@@ -2693,7 +2693,13 @@ def select(P, info, user_rc, local=False):
             groups.setdefault(key, []).append(f)
         if not groups:
             have = sorted({quant_of(f['path']) for f in gg if quant_of(f['path'])})
-            finding(P, 'M-NOT-FOUND', 'no %s GGUF in %s%s' % (want, P['repo'], ('; it has ' + ', '.join(have)) if have else ''))
+            use = ''
+            if have:   # the exact name to give: engine:repo:QUANT (and the commit, when one was given)
+                base = ('llama:' if eng == 'llama' else 'ollama:hf.co/') + P['repo']
+                pin = '@' + P['ref'] if eng == 'llama' and P.get('ref') not in (None, '', 'main') else ''
+                use = ('. Use %s:%s%s' % (base, have[0], pin)) if len(have) == 1 else \
+                      ('. Give one of them, for example %s:%s%s' % (base, next((q for q in ('Q4_K_M', 'Q5_K_M', 'Q4_0', 'Q8_0') if q in have), have[0]), pin))
+            finding(P, 'M-NOT-FOUND', 'no %s GGUF in %s%s%s' % (want, P['repo'], ('; it has ' + ', '.join(have)) if have else '', use))
         else:
             rn = P['repo'].split('/')[-1].lower().replace('-gguf', '').replace('_gguf', '')
             key = sorted(groups, key=lambda k: (rn not in k[1].lower(), k[0].count('/'), len(k[0]), k[1]))[0]
@@ -4703,7 +4709,8 @@ def main(cmd, *a):
                 main = [(p, sz) for p, sz in files if 'mmproj' not in p.lower() and (quant_of(p) or '').upper() == (want or 'Q4_K_M')]
                 if not main:   # the same rule as the security check: no quant given means Q4_K_M
                     have = sorted({quant_of(p) for p, _ in files if quant_of(p) and 'mmproj' not in p.lower()})
-                    raise ValueError('%s has no %s GGUF%s' % (a[0], want or 'Q4_K_M', ('; give one of: ' + ', '.join(have)) if have else ''))
+                    raise ValueError('%s has no %s GGUF%s' % (a[0], want or 'Q4_K_M', ('; it has %s, so add :%s to the name' % (', '.join(have), have[0]) if len(have) == 1
+                                     else '; give one of: ' + ', '.join(have)) if have else ''))
                 main.sort()
                 first = main[0][0]
                 proj = [sz for p, sz in files if 'mmproj' in p.lower()]
@@ -7043,7 +7050,7 @@ MODEL is a menu number or \`llama:ORG/REPO-GGUF:QUANT\`, \`vllm:ORG/REPO\`, \`ol
 - Stop: \`llmserver stop MODEL\` (or \`all\`). Benchmark: \`llmserver bench MODEL\`.
 - Ask a running model one question: \`llmserver chat MODEL "question"\` (prints only the answer on stdout). Do not add \`--yes\` unless the user agreed to start the model.
 - One address for every running model: \`llmserver gateway start\`, then \`http://127.0.0.1:8000/v1\` (the model is chosen by its name, as \`/v1/models\` lists it).
-- A web chat for people: \`llmserver webui\` (installs about 2.5 GB on first use; ask the user first). Documents use hybrid search and a reranker; \`llmserver config set webui_reranker best\` uses bge-reranker-v2-m3 on llama.cpp (a GPU model).
+- A web chat for people: \`llmserver webui\` (installs about 2.5 GB on first use; ask the user first). Documents use hybrid search and a reranker; \`llmserver config set webui_reranker best\` uses bge-reranker-v2-m3 on llama.cpp (a GPU model). The first start asks the person for the admin account in their terminal; an agent cannot answer it, so tell the person to run \`llmserver webui admin\` themselves.
 - Web search in that chat: \`llmserver config set webui_search on\`, then \`llmserver webui restart\`. The questions then go to public search engines: ask the user first.
 - Menu: \`llmserver model add MODEL\` (checks that the name exists), \`llmserver model rm N\`.
 - Settings: \`llmserver config set NAME VALUE\` (checked before it is saved), \`llmserver config unset NAME\`.
@@ -7579,6 +7586,15 @@ cmd_model() {  # list | add SPEC [FLAGS] | rm [N|SPEC...] [--purge] | edit
       for i in "${!specs[@]}"; do [[ ${specs[i]} == "$R_SPEC" ]] && { info "$R_SPEC is already entry $((i + 1)) of the menu"; return 0; }; done
       local spec=$R_SPEC e=$R_ENGINE m=$R_MODEL
       rc=0; model_exists "$e" "$m" || rc=$?
+      # no quant given and the GGUF repo has exactly one: add it with that quant (the security check still runs on start)
+      local oq="" os=""
+      if ((rc == 1)) && [[ $m != *:* && $ME_MSG =~ \;\ it\ has\ ([^\ ,]+)\.\ Use\ ([^\ ]+)$ ]]; then oq=${BASH_REMATCH[1]} os=${BASH_REMATCH[2]}; fi
+      if [[ -n $os ]] && parse_spec "$os"; then
+        info "$m has only $oq GGUF files; adding $R_SPEC"
+        spec=$R_SPEC e=$R_ENGINE m=$R_MODEL
+        for i in "${!specs[@]}"; do [[ ${specs[i]} == "$spec" ]] && { info "$spec is already entry $((i + 1)) of the menu"; return 0; }; done
+        rc=0; model_exists "$e" "$m" || rc=$?
+      fi
       if ((rc == 1)); then die "not added: $ME_MSG"
       elif ((rc == 2)); then warn "could not check that $m exists ($ME_MSG); adding it anyway"; fi
       if [[ ! -e $models_file ]]; then mkdir -p "${models_file%/*}"; echo "# llmserver menu: one '[engine:]model [extra engine flags]' per line" > "$models_file"; fi
@@ -9796,6 +9812,49 @@ c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
 r = c.execute("select count(*), sum(role = \"pending\") from user").fetchone()
 print(r[0], r[1] or 0)' "$db" 2>/dev/null || true
 }
+webui_admin_create() {  # webui-dir env-assignments... -- sandbox-words...: ask for the admin account and create it
+  # with Open WebUI's own code, before it listens. The password goes through a pipe only (no argument,
+  # environment or file). Status 1: not created (no terminal, skipped, or an error).
+  local d=$1 envs=() sb=() name email pw pw2 i out
+  shift
+  while (($#)) && [[ $1 != -- ]]; do envs+=("$1"); shift; done
+  shift; sb=("$@")
+  [[ -t 0 && -t 2 ]] || return 1
+  echo >&2
+  info "${C_B}Open WebUI admin account${C_0}: it manages the users and the settings. Create it now (Enter on the email skips this; then the first person who signs up in the browser becomes the admin)."
+  printf '  Email (to sign in; it is not sent anywhere): ' >&2; IFS= read -r email || email=""
+  [[ -n $email ]] || { info "skipped"; return 1; }
+  [[ $email =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || { warn "'$email' is not an email address; skipped"; return 1; }
+  email=${email,,}   # Open WebUI keeps emails in lower case
+  printf '  Name [%s]: ' "${USER:-Admin}" >&2; IFS= read -r name || name=""; name=${name:-${USER:-Admin}}
+  for i in 1 2 3; do
+    printf '  Password (8 or more characters): ' >&2; IFS= read -rs pw || pw=""; echo >&2
+    if ((${#pw} < 8)); then warn "too short"; continue; fi
+    printf '  Password again: ' >&2; IFS= read -rs pw2 || pw2=""; echo >&2
+    [[ $pw == "$pw2" ]] && break
+    warn "the passwords are not the same"; pw=""
+  done
+  ((${#pw} >= 8)) || { info "skipped"; return 1; }
+  info "creating the admin account $email (this takes a moment: Open WebUI prepares its database)"
+  out=$(printf '%s\n%s\n%s\n' "$email" "$name" "$pw" | env -i "${envs[@]}" FROM_INIT_PY=true "${sb[@]}" "$d/bin/python" -c '
+import asyncio, sys
+email, name, pw = sys.stdin.read().split("\n")[:3]
+from open_webui.utils.auth import create_admin_user
+from open_webui.models.users import Users
+from open_webui.config import Config
+async def main():
+    if await Users.has_users(): return "exists"
+    if not await create_admin_user(email, pw, name): return "failed"
+    await Config.upsert({"ui.enable_signup": False})   # as Open WebUI does for an admin from its environment
+    return "created"
+print("llmserver-admin:" + asyncio.run(main()))' 2>&1 | sed -u 's/^/[admin account] /' | tee -a "$logs_dir/webui.log" | grep -o 'llmserver-admin:.*' || true)
+  pw="" pw2=""
+  case $out in
+    *created) info "the admin account $email is ready; new sign-ups are off (Admin Panel > Settings turns them on; they wait for approval)"; log_write info "webui: admin account created ($email)"; return 0 ;;
+    *exists) info "Open WebUI already has accounts; nothing was created"; return 0 ;;
+    *) warn "the admin account was not created; see $logs_dir/webui.log. Create it in the browser instead"; return 1 ;;
+  esac
+}
 webui_start() {
   local d h=${CFG[WEBUI_HOST]} p=${CFG[WEBUI_PORT]} envs=() sb=() auth=True u n acc rr=${CFG[WEBUI_RERANKER]} search=off e ev dk jv changed first=0 run=() sc
   if svc_alive webui; then info "Open WebUI is running: $(webui_urls "${ST[HOST]}" | head -n 1)"; return 0; fi
@@ -9811,10 +9870,10 @@ webui_start() {
   mkdir -p "$webui_home"/{data,home,models}; chmod 700 "$webui_home"
   webui_models
   port_in_use "$p" && die "port $p is in use; choose another: '$PROG config set webui_port N'"
-  if [[ ${CFG[WEBUI_AUTH]} == on ]] && ! is_loopback "$h"; then
-    # the first account becomes the admin: until it exists, only this computer may reach the page
+  local need_admin=0
+  if [[ ${CFG[WEBUI_AUTH]} == on ]]; then
     read -r n acc <<<"$(webui_accounts)"
-    [[ ${n:-} =~ ^[0-9]+$ ]] && ((n > 0)) || { first=1 h=127.0.0.1; }
+    [[ ${n:-} =~ ^[0-9]+$ ]] && ((n > 0)) || need_admin=1
   fi
   gateway_start 1
   RB_STARTED=0
@@ -9842,6 +9901,12 @@ webui_start() {
     [[ -n ${CFG[WEBUI_TLS_CERT]} ]] && sb+=(--ro-bind "${CFG[WEBUI_TLS_CERT]}" "${CFG[WEBUI_TLS_CERT]}" --ro-bind "${CFG[WEBUI_TLS_KEY]}" "${CFG[WEBUI_TLS_KEY]}")
     mapfile -t -O "${#sb[@]}" sb < <(ca_binds); sb+=(--)
   elif [[ ${CFG[SANDBOX]} == on ]]; then die "LLMSERVER_SANDBOX=on, but bubblewrap does not work here"; fi
+  if ((need_admin)); then
+    # the first account becomes the admin. Make it here, from the terminal, before Open WebUI listens;
+    # without it, only this computer may reach the page, so nobody on the network can take that account
+    webui_admin_create "$d" "${envs[@]}" -- "${sb[@]}" && need_admin=0
+    ((need_admin)) && ! is_loopback "$h" && { first=1 h=127.0.0.1; }
+  fi
   sc=$(webui_scheme)
   if [[ $sc == https ]]; then   # uvicorn (the server inside Open WebUI) serves HTTPS with your certificate
     [[ $(stat -c %a -- "${CFG[WEBUI_TLS_KEY]}") =~ ^[0-7][0-7]0$ ]] || warn "${CFG[WEBUI_TLS_KEY]} can be read by other users; run: chmod 600 '${CFG[WEBUI_TLS_KEY]}'"
@@ -9863,9 +9928,11 @@ webui_start() {
     info "  ${C_B}first start${C_0}: Open WebUI listens on this computer only until its admin account exists, so nobody on the network can take that account."
     info "  1. On this computer, open $sc://127.0.0.1:$p and create the account. (From another computer: 'ssh -L $p:127.0.0.1:$p ${USER:-you}@$(hostname 2>/dev/null || echo this-computer)', then open the same address there.)"
     info "  2. Type '$PROG webui restart'. Then people on the network can use it."
+    info "  Or, in a terminal: '$PROG webui admin' creates the account here and restarts Open WebUI."
   elif [[ $auth == True ]]; then
     read -r n acc <<<"$(webui_accounts)"
-    [[ ${n:-0} == 0 ]] && info "  open it and create the first account: it becomes the admin. Then add people in Admin Panel > Users, or turn on new sign-ups there (they wait for the admin's approval)"
+    if [[ ${n:-0} == 0 ]]; then info "  open it and create the first account: it becomes the admin ('$PROG webui admin' does it from the terminal)"
+    else info "  sign in with the admin account. Add people in Admin Panel > Users, or turn on new sign-ups there (they wait for the admin's approval)"; fi
   fi
   info "  it chats with every running model through the gateway ($(gateway_url)); start models with '$PROG MODEL'"
   info "  documents: $(webui_rag_line "${CFG[WEBUI_RAG]}" "$rr"); web search: $(webui_search_line "$search")"
@@ -9893,11 +9960,19 @@ cmd_webui() {
     start) webui_start ;;
     stop) webui_stop ;;
     restart) webui_stop; webui_start ;;
+    admin)   # create the admin account from the terminal (Open WebUI has no accounts yet)
+      webui_installed || die "Open WebUI is not installed; '$PROG webui' installs it, and asks for the admin account on its first start"
+      [[ ${CFG[WEBUI_AUTH]} == on ]] || die "accounts are off (webui_auth off), so there is no admin account"
+      read -r n acc <<<"$(webui_accounts)"
+      [[ ${n:-} =~ ^[0-9]+$ ]] && ((n > 0)) && { info "Open WebUI already has $n account(s). Manage them in Admin Panel > Users"; return 0; }
+      [[ -t 0 && -t 2 ]] || die "'$PROG webui admin' asks for the password, so it needs a terminal"
+      svc_alive webui && webui_stop
+      webui_start ;;
     status)
       if ! webui_installed; then echo "Open WebUI: not installed ('$PROG install webui')"; return 0; fi
       if svc_alive webui; then
         echo "Open WebUI $(pin webui): running at $(webui_urls "${ST[HOST]}" | head -n 1), pid ${ST[PID]}"
-        [[ ${ST[FIRST]:-0} == 1 ]] && echo "  this computer only, until the admin account exists: create it, then '$PROG webui restart'"
+        [[ ${ST[FIRST]:-0} == 1 ]] && echo "  this computer only, until the admin account exists: '$PROG webui admin' (or create it in the browser here, then '$PROG webui restart')"
         local rag=${ST[RAG]:-hybrid} rr=${ST[RERANKER]:-fast} se=${ST[SEARCH]:-off}
         echo "  documents: $(webui_rag_line "$rag" "$rr")"
         if [[ $rr == best && $rag == hybrid ]] && ! rerank_best_running; then echo "  the reranker is not running, so questions about documents fail: '$PROG webui restart'"; fi

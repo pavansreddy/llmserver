@@ -1,4 +1,4 @@
-# llmserver 2.7.4 — Operator manual
+# llmserver 2.7.5 — Operator manual
 
 This manual uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
 
@@ -118,6 +118,10 @@ The changes of 2.7.3 were tested in a test home: `models share on`, `off` and th
 
 The changes of 2.7.4 were tested with the real NVIDIA SkillSpector 2.12.0 and a local copy of the skills marketplace: a safe skill, a skill with warnings (`CAUTION`), and a malicious skill (`DO_NOT_INSTALL`, refused; installed only with `--accept-risk`), the `strict` level, a missing and a disabled SkillSpector, its own path, and stand-ins for an error, an incomplete analysis and a baseline. Cloud keys in the shell did not reach SkillSpector. The update diff was tested with and without a terminal. The LLM review was tested through the gateway with the API key, against a stand-in engine and against a real llama.cpp with Qwen2.5-1.5B-Instruct (Q4_K_M) on two CPU cores. With the real model, the review found a mismatch between the description and the instructions of a changed skill that the static checks did not find (`SAFE` became `CAUTION`). One answer took longer than the 900 seconds that the gateway waits, so the analysis was incomplete and llmserver asked. A review with a larger model on a GPU was not tested.
 
+The quantization change of 2.7.5 was tested with the real Hugging Face: `model add` of `google/gemma-4-E4B-it-qat-q4_0-gguf` (only Q4_0) with llama.cpp, and of a Google QAT repository with Ollama (`hf.co/...`), added with `:Q4_0`; the same entry a second time (not added again); a repository with many quantizations and a wrong one (nothing added, the full name shown); and `trust check` without a quantization (refused, the full name shown).
+
+The admin account question of 2.7.5 was tested with the real Open WebUI 0.12.3 in a terminal (a pseudo-terminal): a password that was too short, the account created before the start, a log-in with it, Open WebUI on `0.0.0.0` on the first start, `webui admin` when an account exists, and the skip (Enter), which kept the start on `127.0.0.1`.
+
 The vLLM installation method was tested on a small package only. GPU operation was tested with simulated GPUs only. Before your first real start, use `llmserver check`, `llmserver capacity` and `--dry-run`.
 
 ---
@@ -171,7 +175,7 @@ Make sure that the computer agrees with these requirements:
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.7.4`.
+   Result: The command shows `llmserver 2.7.5`.
 
 ### 2.3 Do the setup
 
@@ -347,6 +351,8 @@ See [3.28](#328-chat-with-a-model) for more.
    ```
 
    Result: llmserver makes sure that the model exists on Hugging Face. Then it adds the model to the menu. If the name is not correct, llmserver adds nothing and shows similar names ("did you mean ...?").
+
+   A GGUF name without a quantization means Q4_K_M. If the repository has no Q4_K_M file but has only one quantization (for example the Q4_0 files of Google's QAT models), `model add` adds the entry with that quantization and tells you. If the repository has more than one, llmserver adds nothing and shows the full name to use.
 
 2. To add engine flags to the entry, put them after `--`:
 
@@ -1162,9 +1168,11 @@ Open WebUI is a web chat. People open it in a browser, log in, select one of the
 
    Result: The first time, llmserver asks to install Open WebUI 0.12.3 (about 2.5 GB, with CPU PyTorch) into `~/.llmserver/tools`. Then it starts the gateway (see [3.33](#333-use-one-address-for-all-models-the-gateway)) and Open WebUI, and shows the address, for example `http://192.168.1.20:3000`.
 
-2. Create the first account. The first account is the administrator.
+2. Create the administrator account. On the first start (also from `llmserver setup`), llmserver asks for it in the terminal before Open WebUI starts: an email (to log in; llmserver does not send it anywhere), a name and a password (8 or more characters, typed two times, not shown).
 
-   On the first start, Open WebUI operates on `127.0.0.1` only, also when `LLMSERVER_WEBUI_HOST` is `0.0.0.0`. This prevents a person on the network from creating the administrator account before you. Do these steps:
+   Result: llmserver creates the account with the program of Open WebUI, and turns off new sign-ups. Open WebUI then starts on the network address immediately. The password goes to Open WebUI through a pipe only: it is not in an argument, an environment variable, a file or a log.
+
+   > **NOTE:** To skip this step, push Enter at the email question. Without a terminal (for example `autostart`), llmserver cannot ask. Then the first account that somebody creates in the browser is the administrator. Thus until that account exists, Open WebUI operates on `127.0.0.1` only, also when `LLMSERVER_WEBUI_HOST` is `0.0.0.0`. This prevents a person on the network from creating the administrator account before you. To create the account later from a terminal, type `llmserver webui admin` (llmserver stops Open WebUI, asks for the account, and starts Open WebUI again). Or do these steps:
 
    1. On this computer, open the address that llmserver shows, for example `http://127.0.0.1:3000`. From a different computer, first type `ssh -L 3000:127.0.0.1:3000 USER@HOST`, then open the same address there.
    2. Create the account.
@@ -1206,7 +1214,7 @@ To start Open WebUI when you log in, type `llmserver autostart on webui`.
 | `LLMSERVER_WEBUI` | `ask` | `ask`: the setup asks if it must install Open WebUI. `on`: the setup installs it. `off`: the setup does not ask |
 
 llmserver sets up Open WebUI for safe use on a network:
-- Each person needs an account. New sign-ups are off after the first account, or wait for approval.
+- Each person needs an account. New sign-ups are off after llmserver creates the administrator account. When you turn them on, new accounts wait for approval.
 - Its only connection is the gateway. It cannot connect to the models directly or to Ollama.
 - It does not download at run time (offline mode). Its embedding model and its reranker (for documents in chats) are downloaded once, at a fixed commit, and llmserver compares the SHA-256 of each file. They cannot run code from their files.
 - Community sharing and the check for new versions are off.
@@ -2055,9 +2063,9 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `the skill NAME changed (above) and there is no terminal to ask` (exit 4) | `skills update` found a change | Read the diff, then type `llmserver skills update NAME --yes` |
 | `LLMSERVER_MODEL_STORE is shared, but ...` (`doctor`) | The block is in your login files, but the store is `shared` | Type `llmserver models share off`, or set the store to `private` again |
 | `vLLM had too little GPU memory for the KV cache` | The estimate of llmserver was too low | Use a smaller `--ctx`, or add `-- --gpu-memory-utilization 0.9` |
-| `has no Q4_K_M GGUF; give one of: ...` | The name has no quantization, and the repository has no Q4_K_M file | Add one of the quantizations that llmserver shows, for example `llama:ORG/REPO-GGUF:Q8_0` |
+| `no Q4_K_M GGUF in ...; it has ... Use ...` or `has no Q4_K_M GGUF` | The name has no quantization, and the repository has no Q4_K_M file | Use the name that llmserver shows, for example `llama:ORG/REPO-GGUF:Q4_0`. `model add` does this for you when the repository has only one quantization |
 | `has MIG enabled` | The GPU is divided into MIG instances | Do a check of the fit of each model yourself. llmserver counts the memory of the whole GPU |
-| `Open WebUI listens on this computer only until its admin account exists` | The first start of Open WebUI | Create the account on this computer, then type `llmserver webui restart` |
+| `Open WebUI listens on this computer only until its admin account exists` | The first start of Open WebUI without the account (no terminal, or you skipped the question) | Type `llmserver webui admin` in a terminal. Or create the account on this computer, then type `llmserver webui restart` |
 | `is not an llmserver backup, or it holds other files` | `restore` got a file that is not a backup | Use a file that `llmserver backup` wrote |
 | `another setting has a problem, correct it first` | `config set` found an incorrect value in a different setting | Correct that setting first with `config set` or `config unset` |
 | `/proc and /sys must be mounted` | A container without them | Mount `/proc` and `/sys` |
@@ -2154,7 +2162,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `autostart [list]`, `autostart on\|off MODEL...` | Starts models when you log in (systemd user services) |
 | `stop MODEL` or `stop all` | Stops one model or all models |
 | `pin MODEL`, `unpin MODEL` | Protects a model from a stop, or removes the protection |
-| `webui [start\|stop\|restart\|status]` | Open WebUI, a web chat for people on the network. Installs it on first use. `restart` applies changed settings |
+| `webui [start\|stop\|restart\|status\|admin]` | Open WebUI, a web chat for people on the network. Installs it on first use, and asks for the admin account on the first start. `restart` applies changed settings. `admin` creates the admin account when there is none |
 | `gateway [start\|stop\|status]` | One OpenAI-compatible address for every running model, and `/metrics`. With `gateway_autoload on`, it also starts menu models on demand |
 | `chat [MODEL] [MESSAGE]` | Starts a chat with a model in the terminal. With a message, or a pipe, it answers once. `--system TEXT` sets a system prompt |
 | `env [MODEL]` | Shows the client variables |
