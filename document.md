@@ -1,4 +1,4 @@
-# llmserver 2.8.1 — Operator manual
+# llmserver 2.8.2 — Operator manual
 
 This manual uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
 
@@ -127,6 +127,8 @@ The terminal of 2.8.0 was tested with the real Open WebUI 0.12.3 and the real Op
 
 The version settings of 2.8.1 were tested in a test home: `config set`, `get`, `list` and `unset` for each setting, the refusal of incorrect values, and the installation plan with the versions from the settings. The checksums of llama.cpp and Ollama releases were tested with a simulated GitHub: the files of the CUDA build and its `cudart` file, a second installation without a new request, a release without checksums (refused) and a release that does not exist (refused). `upgrade webui --latest` and `upgrade terminal --latest` were tested with the real PyPI. The lock file of Open WebUI 0.13.4 was made for Python 3.12 with CPU PyTorch (242 packages). A real download from GitHub and a start of Open WebUI 0.13.x with the settings of llmserver were not tested.
 
+The changes of 2.8.2 were tested with the real runtime and the real PyPI: `versions --latest` (text and JSON) found the newest vLLM, Open WebUI and Open Terminal, and showed `?` with the reason for the GitHub components, because the GitHub API was not available on the test network. The GitHub part was tested with a simulated GitHub: a newer llama.cpp release, an Ollama release without checksums, an engine from `PATH`, an Open WebUI that is not the version in its setting, and a computer without a GPU for vLLM. `upgrade --latest -n` was tested with the real PyPI and a simulated GitHub: it showed the new versions in the plan, did not install the runtime and did not write `pins.local`.
+
 The vLLM installation method was tested on a small package only. GPU operation was tested with simulated GPUs only. Before your first real start, use `llmserver check`, `llmserver capacity` and `--dry-run`.
 
 ---
@@ -180,7 +182,7 @@ Make sure that the computer agrees with these requirements:
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.8.1`.
+   Result: The command shows `llmserver 2.8.2`.
 
 ### 2.3 Do the setup
 
@@ -788,7 +790,25 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
 
    Result: llmserver updates the runtime and each component that is installed: the engines in the llmserver home, Open WebUI, SearXNG and Open Terminal. It does not install a component that is not installed. It deletes the older version of Open WebUI, SearXNG and Open Terminal when they do not operate.
 
-2. To install the newest version of an engine, use `--latest`:
+2. To see which components have a newer release, before you change anything:
+
+   ```bash
+   llmserver versions --latest
+   ```
+
+   Result: llmserver asks GitHub and PyPI and shows a table. It changes nothing.
+
+   | Column | Contents |
+   |---|---|
+   | `INSTALLED` | The installed version. `system` is an engine that you installed (see [3.18](#318-use-an-engine-that-you-installed)). `-` is not installed |
+   | `UPGRADE` | The version that `llmserver upgrade` installs |
+   | `FROM` | The source of that version: `built in`, `pins.local` or a version setting (see [3.38](#338-choose-the-versions)) |
+   | `LATEST` | The newest release. `?` if llmserver cannot ask the server; the note tells you why |
+   | `NOTE` | What to do, for example `newer: 'llmserver upgrade llama --latest'`, or why `upgrade --latest` would refuse the newest release |
+
+   Add `--json` to get the same data for a program.
+
+3. To install the newest version of an engine, use `--latest`:
 
    ```bash
    llmserver upgrade llama --latest
@@ -796,13 +816,15 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
 
    Result: llmserver installs the newest release only if the release publishes a SHA-256 checksum for each file.
 
-3. Do a check of the versions:
+4. Do a check of the versions:
 
    ```bash
    llmserver versions
    ```
 
 > **NOTE:** Models that operate keep the old engine until you start them again.
+
+> **NOTE:** `llmserver upgrade --latest -n` shows the plan with the newest versions. It does not install anything, and it does not change `pins.local`. It needs the runtime of llmserver to ask GitHub and PyPI.
 
 > **NOTE:** `--latest` applies to uv, llama.cpp, Ollama, vLLM, Open WebUI and Open Terminal. For vLLM, Open WebUI and Open Terminal, llmserver gets the newest version from PyPI. SearXNG stays at the commit that the script specifies.
 
@@ -2203,6 +2225,8 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `publishes no SHA-256 digests` | `upgrade --latest` cannot verify the release | Keep the specified version |
 | `publishes no SHA-256 digest for FILE, so it cannot be verified` | The release in a version setting has no checksums on GitHub (often an old release) | Set a newer release, or type `llmserver config unset llama_version` (or `ollama_version`) |
 | `llama.cpp has no release ... on GitHub` (or Ollama) | The version in the setting does not exist | Find the name of the release on GitHub, or remove the setting |
+| `'versions --latest' needs llmserver's runtime` | The runtime is not installed | Type `llmserver install runtime` |
+| `could not ask GitHub for the latest ...` or `could not ask PyPI ...` (`versions --latest`) | No network access to the server, or GitHub limits the requests | Try again later. Set `LLMSERVER_GITHUB_API` or `LLMSERVER_PYPI` for a mirror |
 | `could not resolve Open WebUI X` (or vLLM, Open Terminal) | The version is not on PyPI, or it needs a different Python | Set a different version, or remove the setting |
 | `... is set and wins over --latest` | A version setting is set | No action. To follow `--latest`, remove the setting |
 | `Open Terminal runs only in the sandbox ... so Open WebUI has no terminal` | `webui_terminal on`, and bubblewrap does not work or `LLMSERVER_SANDBOX=off` | Install bubblewrap (see [4.17](#417-isolate-the-engines)). Or type `llmserver config set webui_terminal host` (no sandbox) or `off` |
@@ -2335,7 +2359,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `install [COMPONENT...]` | Installs `runtime`, `llama`, `ollama`, `vllm`, `all` (the engines), `webui`, `searxng` or `terminal` |
 | `upgrade [COMPONENT]` | Installs the versions in the version settings, or the specified versions, of the installed components (or of `runtime`, `llama`, `ollama`, `vllm`, `webui`, `searxng`, `terminal`). With `--latest`, the newest verified versions |
 | `rollback COMPONENT` | Goes back to the previous build |
-| `versions` | Shows what is installed |
+| `versions` | Shows what is installed. `--latest` also shows the newest releases and what `upgrade` would change. It changes nothing |
 | `doctor` | Does a check of llmserver. `--fix` repairs. `--deep` also compares the checksums of the model files |
 | `uninstall` | Removes llmserver |
 
@@ -2370,7 +2394,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `--garak`, `--probes LIST` | Also runs garak, with these probes (`eval`) |
 | `--force` | Replaces or removes a changed skill, or a skill that llmserver did not install (`skills`) |
 | `--fix` | Repairs (`doctor`) |
-| `--latest` | Uses the newest verified versions (`upgrade`). Components with a version setting do not change |
+| `--latest` | `upgrade`: uses the newest verified versions. Components with a version setting do not change. `versions`: shows the newest releases |
 | `-y`, `--yes` | Accepts without a question (`setup`, `install`, `uninstall`, `restore`, `models prune`, security warnings). It does not approve the Python code of a model. With `chat`, it only starts the model: security warnings of that model still need an answer |
 | `-v`, `--verbose` | Shows more details |
 | `--runs N`, `--long N`, `--gen N`, `--history` | Controls `bench` |

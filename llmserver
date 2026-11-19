@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-readonly PROG=llmserver VERSION=2.8.1
+readonly PROG=llmserver VERSION=2.8.2
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "$PROG: bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 1
 fi
@@ -336,6 +336,9 @@ Usage:
                               Open Terminal)
   $PROG rollback COMPONENT    go back to the previously installed build
   $PROG versions [--json]     what is installed, from where, and the previous builds
+  $PROG versions --latest [--json]
+                              also the newest upstream release of each component, and whether
+                              'upgrade' or 'upgrade --latest' would change it (changes nothing)
   $PROG versions --sbom       a CycloneDX software bill of materials of everything llmserver
                               installed, with every hash, and the checked models
   $PROG check [MODEL] [--json]
@@ -713,7 +716,9 @@ fi
 ((opt_remote_code)) && [[ $cmd:$sub != trust:approve ]] && die "--remote-code only applies to '$PROG trust approve MODEL --remote-code'"
 ((opt_code)) && [[ $cmd:$sub != trust:show ]] && die "--code only applies to '$PROG trust show MODEL --code'"
 ((opt_deep)) && [[ $cmd != doctor ]] && die "--deep only applies to '$PROG doctor --deep'"
-if ((opt_latest)) && [[ $cmd != upgrade ]]; then die "--latest only applies to '$PROG upgrade'"; fi
+if ((opt_latest)) && [[ $cmd != upgrade && $cmd != versions ]]; then die "--latest only applies to '$PROG upgrade' and '$PROG versions'"; fi
+((opt_latest && opt_sbom)) && die "--latest and --sbom do not go together"
+
 if ((opt_fix)) && [[ $cmd != doctor ]]; then die "--fix only applies to '$PROG doctor'"; fi
 if ((restart || opt_evict || opt_offload || foreground)) && [[ $cmd != serve ]]; then
   die "--restart, --evict, --offload and --foreground only apply when starting a model"
@@ -1261,8 +1266,10 @@ FLASHINFER_INDEX=$(setting LLMSERVER_FLASHINFER_INDEX https://flashinfer.ai/whl)
 
 declare -A PINL=()   # pins.local: pins from 'upgrade --latest', and digests fetched for LLMSERVER_*_VERSION
 declare -A VER_SETTING=([llama]=LLAMA_VERSION [ollama]=OLLAMA_VERSION [vllm]=VLLM_VERSION [webui]=WEBUI_VERSION [open_terminal]=WEBUI_TERMINAL_VERSION)
+PINS_HELD=0   # 1: PINL holds unsaved pins (a dry run of 'upgrade --latest'); do not reload them
 pins_load() {
   local line k v
+  ((PINS_HELD)) && return 0
   PINL=()
   [[ -r $lhome/pins.local ]] || return 0
   while IFS= read -r line; do
@@ -1849,8 +1856,50 @@ pins_resolve() {  # component
   fi
   log_write info "pins for $s=$v: ${lines[*]}"
 }
+pypi_latest() {  # package -> its newest release on PyPI (not a pre-release)
+  local py v
+  py=$(helper_python) || return 1
+  v=$(curl -fsSL --proto '=https' --max-time 60 "$PYPI/pypi/$1/json" | "$py" -I -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null) || return 1
+  [[ $v =~ ^[0-9][0-9A-Za-z.]*$ ]] || return 1
+  printf '%s\n' "$v"
+}
+pin_name() { case $1 in runtime) echo uv ;; terminal) echo open_terminal ;; *) echo "$1" ;; esac; }   # component -> its key in PIN
+latest_of() {  # component -> LT_TAG (newest upstream), LT_LINES (what pins.local would record), LT_ERR
+  # (why that release cannot be used). Status 1 when upstream could not be asked at all.
+  local c=$1 repo out name sha k pn
+  pn=$(pin_name "$c")
+  LT_TAG="" LT_LINES=() LT_ERR=""
+  helper_python >/dev/null || { LT_ERR="needs llmserver's runtime ('$PROG install runtime')"; return 1; }
+  case $c in
+    llama|ollama|runtime)
+      case $c in llama) repo=ggml-org/llama.cpp ;; ollama) repo=ollama/ollama ;; *) repo=astral-sh/uv ;; esac
+      out=$(gh_release "$repo" 2>/dev/null) && [[ -n $out ]] || { LT_ERR="could not ask GitHub for the latest $repo release"; return 1; }
+      LT_TAG=${out%%$'\n'*}
+      [[ $LT_TAG =~ ^[A-Za-z0-9._+-]+$ ]] || { LT_TAG="" LT_ERR="GitHub gave an unexpected tag for $repo"; return 1; }
+      while read -r name sha; do
+        [[ ($name == *linux* || $name == *ubuntu*) && $sha =~ ^[0-9a-f]{64}$ ]] || continue
+        if [[ $c == ollama ]]; then LT_LINES+=("sha:$name@$LT_TAG=$sha"); else LT_LINES+=("sha:$name=$sha"); fi
+      done <<<"$(tail -n +2 <<<"$out")"
+      if ((${#LT_LINES[@]})); then LT_LINES+=("$pn=$LT_TAG")
+      else LT_ERR="the latest $repo release ($LT_TAG) publishes no SHA-256 digests for its Linux files, so it cannot be verified"; fi ;;
+    vllm|webui|terminal)
+      case $c in vllm) name=vllm ;; webui) name=open-webui ;; *) name=open-terminal ;; esac
+      LT_TAG=$(pypi_latest "$name") || { LT_ERR="could not ask PyPI for the latest $name"; return 1; }
+      LT_LINES=("$pn=$LT_TAG")
+      if [[ $c == vllm && $(vllm_variant) == rocm ]]; then
+        k=$(curl -fsSL --proto '=https' --max-time 60 "$VLLM_ROCM_INDEX/$LT_TAG/" | grep -oE 'rocm[0-9]+' | sort -V | tail -n 1) || true
+        if [[ -n $k ]]; then LT_LINES+=("vllm_rocm=$k"); else LT_LINES=() LT_ERR="vLLM $LT_TAG has no ROCm wheels yet"; fi
+      fi ;;
+    searxng) LT_ERR="SearXNG has no releases; llmserver pins a commit, and a new llmserver release brings a new one" ;;
+  esac
+  return 0
+}
+ver_newer() {  # a b -> is version a newer than b? (b/v prefixes ignored)
+  local a=${1#[bv]} b=${2#[bv]}
+  [[ -n $a && -n $b && $a != "$b" ]] && ver_ge "$a" "$b"
+}
 cmd_upgrade() {  # [component] [--latest]
-  local c=${1:-all} out tag name sha ok lines=() comps=() k
+  local c=${1:-all} lines=() comps=() k pn
   pins_load
   case $c in
     all) comps=(runtime)   # what is installed now; 'upgrade' never installs a new component
@@ -1862,53 +1911,101 @@ cmd_upgrade() {  # [component] [--latest]
     *) die "unknown component '$c': runtime, llama, ollama, vllm, webui, searxng or terminal" ;;
   esac
   if ((opt_latest)); then
-    install_runtime
-    lhome_init
+    if ((dry)); then   # a dry run asks upstream, but installs nothing and writes no pins
+      helper_python >/dev/null || die "'upgrade --latest -n' needs llmserver's runtime to ask GitHub and PyPI; '$PROG install runtime' installs it"
+    else install_runtime; lhome_init; fi
     for c in "${comps[@]}"; do
-      k=${VER_SETTING[$([[ $c == terminal ]] && echo open_terminal || echo "$c")]-}
+      pn=$(pin_name "$c"); k=${VER_SETTING[$pn]-}
       if [[ -n $k && -n ${CFG[$k]} ]]; then
         info "$c: LLMSERVER_$k=${CFG[$k]} is set and wins over --latest; '$PROG config unset ${k,,}' to follow the latest release"
         continue
       fi
-      case $c in
-        llama|ollama|runtime)
-          local repo; case $c in llama) repo=ggml-org/llama.cpp ;; ollama) repo=ollama/ollama ;; *) repo=astral-sh/uv ;; esac
-          out=$(gh_release "$repo") || die "could not ask GitHub for the latest $repo release"
-          tag=${out%%$'\n'*}; ok=0
-          while read -r name sha; do
-            [[ ($name == *linux* || $name == *ubuntu*) && $sha =~ ^[0-9a-f]{64}$ ]] || continue
-            if [[ $c == ollama ]]; then lines+=("sha:$name@$tag=$sha"); else lines+=("sha:$name=$sha"); fi; ok=1
-          done <<<"$(tail -n +2 <<<"$out")"
-          ((ok)) || die "the latest $repo release ($tag) publishes no SHA-256 digests for its Linux files, so it cannot be verified; staying on $(pin "$([[ $c == runtime ]] && echo uv || echo "$c")")"
-          lines+=("$([[ $c == runtime ]] && echo uv || echo "$c")=$tag") ;;
-        webui|terminal)
-          local py pkg pn; py=$(helper_python)
-          case $c in webui) pkg=open-webui pn=webui ;; *) pkg=open-terminal pn=open_terminal ;; esac
-          tag=$(curl -fsSL --proto '=https' --max-time 60 "$PYPI/pypi/$pkg/json" | "$py" -I -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])') || die "could not ask PyPI for the latest $pkg"
-          [[ $tag =~ ^[0-9][0-9A-Za-z.]*$ ]] || die "PyPI gave an unexpected version for $pkg: '$tag'"
-          [[ $tag != "${PIN[$pn]}" ]] && warn "$pkg $tag is newer than the version this llmserver was tested with (${PIN[$pn]}); check its settings after the start$([[ $c == webui ]] && echo "; its database is upgraded and cannot go back, so '$PROG backup' first")"
-          lines+=("$pn=$tag") ;;
-        searxng) info "searxng stays at the commit this llmserver pins (${PIN[searxng]:0:12}); a new llmserver release brings a new pin" ;;
-        vllm)
-          local py; py=$(helper_python)
-          tag=$(curl -fsSL --proto '=https' --max-time 60 "$PYPI/pypi/vllm/json" | "$py" -I -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])') || die "could not ask PyPI for the latest vLLM"
-          lines+=("vllm=$tag")
-          if [[ $(vllm_variant) == rocm ]]; then
-            k=$(curl -fsSL --proto '=https' --max-time 60 "$VLLM_ROCM_INDEX/$tag/" | grep -oE 'rocm[0-9]+' | sort -V | tail -n 1) || true
-            [[ -n $k ]] || die "vLLM $tag has no ROCm wheels yet; staying on $(pin vllm)"
-            lines+=("vllm_rocm=$k")
-          fi ;;
-      esac
+      if [[ $c == searxng ]]; then info "searxng stays at the commit this llmserver pins (${PIN[searxng]:0:12}); a new llmserver release brings a new pin"; continue; fi
+      latest_of "$c" || die "$LT_ERR"
+      [[ -z $LT_ERR ]] || die "$LT_ERR; staying on $(pin "$pn")"
+      if [[ $c == webui || $c == terminal ]] && [[ $LT_TAG != "${PIN[$pn]}" ]]; then
+        warn "$([[ $c == webui ]] && echo open-webui || echo open-terminal) $LT_TAG is newer than the version this llmserver was tested with (${PIN[$pn]}); check its settings after the start$([[ $c == webui ]] && echo "; its database is upgraded and cannot go back, so '$PROG backup' first")"
+      fi
+      lines+=("${LT_LINES[@]}")
     done
-    ((${#lines[@]})) && pins_save "${lines[@]}"
-    log_write info "upgrade --latest pinned: ${lines[*]}"
+    if ((dry)); then
+      for k in "${lines[@]}"; do PINL[${k%%=*}]=${k#*=}; done
+      PINS_HELD=1
+      ((${#lines[@]})) && info "dry run: pins.local was not changed; it would record $(printf '%s\n' "${lines[@]}" | grep -v '^sha:' | paste -sd' ' -)"
+    else
+      ((${#lines[@]})) && pins_save "${lines[@]}"
+      log_write info "upgrade --latest pinned: ${lines[*]}"
+    fi
   fi
   yes=1 cmd_install "${comps[@]}"
+  ((dry)) && return 0
   [[ " ${comps[*]} " == *" runtime "* ]] && skills_refresh   # the hf-cli skill follows the pinned hf
   return 0
 }
+tool_versions() {  # webui | terminal | searxng -> the versions installed in tools/, one per line
+  local d
+  case $1 in
+    webui) for d in "$lhome/tools/open-webui"/*/; do [[ -x ${d}bin/open-webui ]] && basename -- "$d"; done ;;
+    terminal) for d in "$lhome/tools/open-terminal"/*/; do [[ -x ${d}bin/open-terminal ]] && basename -- "$d"; done ;;
+    searxng) for d in "$lhome/tools/searxng"/*/; do [[ -x ${d}venv/bin/granian ]] && basename -- "$d"; done ;;
+  esac
+  return 0
+}
+installed_version() {  # component -> its installed version(s), "system" for your own engine, or nothing
+  local v
+  case $1 in
+    runtime) [[ -x $lhome/bin/uv ]] && { v=$("$lhome/bin/uv" --version 2>/dev/null) || true; v=${v#uv }; printf '%s\n' "${v%% *}"; } ;;
+    llama|ollama|vllm)
+      if [[ $(engine_source "$1") != managed ]]; then echo system
+      elif comp_meta "$1"; then printf '%s\n' "${CM[VERSION]}"; fi ;;
+    *) tool_versions "$1" | paste -sd, - ;;
+  esac
+  return 0
+}
+cmd_versions_latest() {  # [--json]: installed, what 'upgrade' would install, and the newest upstream; changes nothing
+  local c pn inst target from latest note ok items=() k up
+  helper_python >/dev/null || die "'versions --latest' needs llmserver's runtime to ask GitHub and PyPI; '$PROG install runtime' installs it"
+  ((json)) || { info "asking GitHub and PyPI for the newest releases (nothing is changed)"
+    printf '%-9s %-14s %-14s %-24s %-12s %s\n' COMPONENT INSTALLED UPGRADE FROM LATEST NOTE; }
+  for c in runtime llama ollama vllm webui terminal searxng; do
+    pn=$(pin_name "$c") inst=$(installed_version "$c") note="" ok=1 up=0
+    if [[ $c == searxng ]]; then target=${PIN[searxng]:0:12} from="built in"
+    else target=$(pin "$pn") from=$(pin_from "$pn"); fi
+    if latest_of "$c"; then
+      latest=${LT_TAG:--}
+      [[ -n $LT_ERR ]] && { ok=0; [[ $c != searxng ]] && note="'upgrade --latest' would refuse it: $LT_ERR"; }
+    else latest="?" ok=0 note=$LT_ERR; fi
+    [[ $c == searxng ]] && latest=-
+    if [[ $inst == system ]]; then
+      note="your own copy (LLMSERVER_${c^^}_SOURCE); llmserver does not upgrade it"
+    elif [[ -z $note ]]; then
+      if [[ -z $inst && $c == vllm && $(vllm_variant) == none ]]; then note="not available here (needs an NVIDIA GPU, or AMD on x86-64)"
+      elif [[ -z $inst ]]; then note="not installed"
+      elif [[ ,$inst, != *",$target,"* ]]; then note="'$PROG upgrade $c' installs $target"
+      fi
+      if [[ $latest != [-?] && $note != "not available here"* ]] && ver_newer "$latest" "$target"; then
+        up=1; k=${VER_SETTING[$pn]-}
+        if [[ -n $k && -n ${CFG[$k]-} ]]; then note+="${note:+; }newer upstream; LLMSERVER_$k holds $target"
+        elif [[ -n $inst ]]; then note+="${note:+; }newer: '$PROG upgrade $c --latest'"
+        else note+="${note:+; }newer upstream"; fi
+      elif [[ -z $note ]]; then note="up to date"; fi
+    fi
+    if ((json)); then
+      local iv=() lj=null
+      [[ -n $inst ]] && IFS=, read -r -a iv <<<"$inst"
+      [[ $latest == [-?] ]] || lj=$(js "$latest")
+      items+=("$(jo component "$(js "$c")" installed "$(jsa "${iv[@]}")" upgrade_to "$(js "$target")" from "$(js "$from")" \
+        latest "$lj" latest_usable "$(jb "$ok")" newer "$(jb "$up")" note "$(js "$note")")")
+    else
+      printf '%-9s %-14s %-14s %-24s %-12s %s\n' "$c" "${inst:--}" "$target" "$from" "$latest" "$note"
+    fi
+  done
+  if ((json)); then jo version "$(js "$VERSION")" home "$(js "$lhome")" checked "$(js "$(date -u +%FT%TZ)")" components "$(ja "${items[@]}")"; echo
+  else echo "UPGRADE is what '$PROG upgrade' installs; nothing was changed."; fi
+}
 cmd_versions() {  # [--json]
   local c src items=() v k
+  ((opt_latest)) && { cmd_versions_latest; return; }
   engine_paths
   for c in runtime llama ollama vllm; do
     src=managed; [[ $c != runtime ]] && src=$(engine_source "$c")
@@ -1928,20 +2025,21 @@ cmd_versions() {  # [--json]
       else printf '%-8s %-8s not installed (%s)\n' "$c" managed "$(plan_line "$c")"; fi
     fi
   done
-  if webui_installed; then
-    if ((json)); then items+=("$(jo component '"webui"' source '"managed"' version "$(js "$(pin webui)")" path "$(js "$(webui_dir)")")")
-    else printf '%-8s %-8s %-12s %-10s %s\n' webui managed "$(pin webui)" cpu "(Open WebUI; '$PROG webui status')"; fi
-  fi
-  if searxng_installed; then
-    if ((json)); then items+=("$(jo component '"searxng"' source '"managed"' version "$(js "${PIN[searxng]:0:12}")" path "$(js "$(searxng_dir)")")")
-    else printf '%-8s %-8s %-12s %-10s %s\n' searxng managed "${PIN[searxng]:0:12}" cpu "(web search for Open WebUI)"; fi
-  fi
-  if terminal_installed; then
-    if ((json)); then items+=("$(jo component '"terminal"' source '"managed"' version "$(js "$(pin open_terminal)")" path "$(js "$(terminal_dir)")")")
-    else printf '%-8s %-8s %-12s %-10s %s\n' terminal managed "$(pin open_terminal)" cpu "(Open Terminal for Open WebUI)"; fi
-  fi
+  local label want dir
+  for c in webui searxng terminal; do
+    case $c in
+      webui) label="(Open WebUI; '$PROG webui status')" want=$(pin webui) dir=$lhome/tools/open-webui ;;
+      searxng) label="(web search for Open WebUI)" want=${PIN[searxng]:0:12} dir=$lhome/tools/searxng ;;
+      terminal) label="(Open Terminal for Open WebUI)" want=$(pin open_terminal) dir=$lhome/tools/open-terminal ;;
+    esac
+    while IFS= read -r v; do
+      [[ -n $v ]] || continue
+      if ((json)); then items+=("$(jo component "$(js "$c")" source '"managed"' version "$(js "$v")" path "$(js "$dir/$v")" pinned "$(js "$want")")")
+      else printf '%-8s %-8s %-12s %-10s %s%s\n' "$c" managed "$v" cpu "$label" "$([[ $v != "$want" ]] && echo "  ('$PROG upgrade $c' installs $want)" || true)"; fi
+    done < <(tool_versions "$c")
+  done
   if ((json)); then jo version "$(js "$VERSION")" home "$(js "$lhome")" uv "$(js "$(pin uv)")" components "$(ja "${items[@]}")"; echo
-  else echo "Home: $lhome  (uv $(pin uv)$([[ -r $lhome/pins.local ]] && echo '; newer pins in pins.local' || true))"
+  else echo "Home: $lhome  (uv $(pin uv)$([[ -r $lhome/pins.local ]] && echo '; newer pins in pins.local' || true)); '$PROG versions --latest' compares with upstream"
     for k in "${!VER_SETTING[@]}"; do [[ -n ${CFG[${VER_SETTING[$k]}]} ]] && echo "Version setting: LLMSERVER_${VER_SETTING[$k]}=${CFG[${VER_SETTING[$k]}]}"; done; true; fi
 }
 

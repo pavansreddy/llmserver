@@ -2,7 +2,7 @@
 
 **Run local LLMs on Linux with one command. Every download is checked, every engine is sandboxed, and each model gets its own OpenAI-compatible endpoint.**
 
-![version](https://img.shields.io/badge/version-2.8.1-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+![version](https://img.shields.io/badge/version-2.8.2-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 llmserver is a single bash script. It installs and runs **llama.cpp**, **vLLM** and **Ollama** for you. Before a model starts, llmserver:
 
@@ -76,7 +76,7 @@ Download `llmserver` and `SHA256SUMS` from the [latest release](../../releases/l
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS                  # must show: llmserver: OK
 chmod +x llmserver && mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
-llmserver --version                                       # llmserver 2.8.1
+llmserver --version                                       # llmserver 2.8.2
 ```
 
 ### Set up
@@ -542,7 +542,7 @@ The bundle carries the versions from your version settings, so B installs the sa
 
 | Task | How |
 |---|---|
-| JSON output | Add `--json` to `ps`, `check`, `capacity`, `list`, `doctor`, `versions`, `trust`, `models`, `skills`, `eval`, `config` or `bench`. JSON goes to stdout, messages to stderr |
+| JSON output | Add `--json` to `ps`, `check`, `capacity`, `list`, `doctor`, `versions` (also `versions --latest`), `trust`, `models`, `skills`, `eval`, `config` or `bench`. JSON goes to stdout, messages to stderr |
 | Health check | `llmserver doctor` exits with 1 while a problem remains |
 | Start models at login | `llmserver autostart on 1 2` (systemd user services). Add `loginctl enable-linger $USER` to start at boot |
 | One-shot answers | `llmserver chat 2 "question"` or `cat notes.txt \| llmserver chat 2` |
@@ -604,8 +604,10 @@ SkillSpector gets a clean environment: no cloud keys, and never a hosted model. 
 llmserver install all -n          # show the plan
 llmserver install llama ollama    # or: vllm, runtime, webui, searxng, terminal
 llmserver versions                # what is installed
+llmserver versions --latest       # also the newest upstream releases, and what upgrade would change (changes nothing)
 llmserver upgrade                 # your chosen versions, else the pinned ones, of everything installed
 llmserver upgrade llama --latest  # newest release, only if it publishes SHA-256 sums
+llmserver upgrade --latest -n     # the plan with the newest versions; installs and records nothing
 llmserver upgrade webui --latest  # newest Open WebUI on PyPI (back up first)
 llmserver rollback llama          # previous build (run again to go forward)
 ```
@@ -812,7 +814,7 @@ The uninstall never touches:
 | `backup [-o FILE]` · `restore FILE` | Back up and restore |
 | `skills list\|check\|preview\|add\|update\|remove` | AI-agent skills (checked by llmserver and, when installed, NVIDIA SkillSpector) |
 | `export` · `import` · `install --from` | Offline bundles |
-| `eval [MODEL]` · `versions [--sbom]` | Probes · versions and SBOM |
+| `eval [MODEL]` · `versions [--latest\|--sbom]` | Probes · versions, newest upstream releases, and SBOM |
 | `hf ARGS…` | The pinned Hugging Face CLI |
 | `setup` · `install` · `upgrade [--latest]` · `rollback` · `doctor` · `uninstall` | Life cycle (components: runtime, llama, ollama, vllm, webui, searxng, terminal) |
 
