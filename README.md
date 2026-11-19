@@ -2,7 +2,7 @@
 
 **Run local LLMs on Linux with one command. Every download is checked, every engine is sandboxed, and each model gets its own OpenAI-compatible endpoint.**
 
-![version](https://img.shields.io/badge/version-2.7.5-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+![version](https://img.shields.io/badge/version-2.8.1-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 llmserver is a single bash script. It installs and runs **llama.cpp**, **vLLM** and **Ollama** for you. Before a model starts, llmserver:
 
@@ -13,13 +13,14 @@ llmserver is a single bash script. It installs and runs **llama.cpp**, **vLLM** 
 Optional add-ons:
 
 - a web chat for your team (**Open WebUI**), with document search;
+- a terminal in that chat where models run commands and edit files (**Open Terminal**), in the sandbox;
 - private web search (**SearXNG**);
 - one gateway address for all your models.
 
 Its design rules:
 
 - **One script.** No Docker, no sudo, no system packages, no system Python.
-- **Everything pinned and checked.** Each download is checked against a fixed SHA-256, and Python packages come from hash-locked lists.
+- **Everything pinned and checked.** Each download is checked against a fixed SHA-256, and Python packages come from hash-locked lists. You can choose other versions; they are checked the same way.
 - **Safe by default.** The engines run in a sandbox with a clean environment. Models must pass security checks before they start.
 - **Self-contained.** Everything lives in `~/.llmserver`. `llmserver uninstall` removes it.
 
@@ -31,6 +32,7 @@ Its design rules:
 
 1. [Quick start](#quick-start)
 2. [Web chat for your team (Open WebUI)](#web-chat-for-your-team-open-webui)
+   - [A terminal for the models](#a-terminal-for-the-models-on-by-default)
 3. [One address for all models (gateway)](#one-address-for-all-models-gateway)
 4. [Everyday commands](#everyday-commands)
 5. [Manage models](#manage-models)
@@ -42,6 +44,7 @@ Its design rules:
 11. [Computers without internet](#computers-without-internet)
 12. [Automation, scripts and AI agents](#automation-scripts-and-ai-agents)
 13. [Engines: install, upgrade, roll back](#engines-install-upgrade-roll-back)
+    - [Choose versions](#choose-versions)
 14. [Settings](#settings)
 15. [Back up, restore and move](#back-up-restore-and-move)
 16. [Troubleshooting](#troubleshooting)
@@ -73,7 +76,7 @@ Download `llmserver` and `SHA256SUMS` from the [latest release](../../releases/l
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS                  # must show: llmserver: OK
 chmod +x llmserver && mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
-llmserver --version                                       # llmserver 2.7.5
+llmserver --version                                       # llmserver 2.8.1
 ```
 
 ### Set up
@@ -149,8 +152,25 @@ How llmserver sets up Open WebUI:
 - It runs in the sandbox and can write only to `~/.llmserver/webui`.
 - It gets none of your tokens.
 - It cannot fetch pages on your private network.
+- It comes with a terminal for the models (Open Terminal), in the sandbox, in its own workspace. Every account can use it. `llmserver config set webui_terminal off` removes it.
+
+To run a different Open WebUI version, see [Choose versions](#choose-versions).
 
 > Open WebUI has its own license. Keep its branding if more than 50 people use it in 30 days, unless you have an enterprise license.
+
+### A terminal for the models (on by default)
+
+Open WebUI comes with Open Terminal: models run commands and edit files, and people see the files beside the chat. Choose it with the terminal button in a chat. The model needs tool calling and a context of 16k or more.
+
+It runs in the sandbox: a read-only system, a workspace in `~/.llmserver/webui/terminal/home` as its home, no view of your files or llmserver's settings, network access for `pip` and `git`. It listens on `127.0.0.1:8889`; people reach it through Open WebUI.
+
+| Setting | Effect |
+|---|---|
+| `webui_terminal on` (default) | In the sandbox. Without bubblewrap, Open WebUI starts without a terminal |
+| `webui_terminal host` | No sandbox: models get your full user rights |
+| `webui_terminal off` | No terminal |
+
+> Every account shares one workspace. Limit who can use it in *Settings → Admin → Integrations → Open Terminal*. A model in the terminal does what the chat, or a document it reads, tells it to: keep secrets out of the workspace.
 
 ---
 
@@ -448,7 +468,7 @@ Without a terminal, a warning ends with exit status 4. Add `--yes` to accept war
 
 ### Sandbox
 
-Install bubblewrap (`sudo apt install bubblewrap`) and run `llmserver doctor` to confirm it works. Each engine, Open WebUI and SearXNG then run in a sandbox with:
+Install bubblewrap (`sudo apt install bubblewrap`) and run `llmserver doctor` to confirm it works. Each engine, Open WebUI, SearXNG and Open Terminal then run in a sandbox with:
 
 - a read-only system;
 - an empty home: no SSH keys, cloud credentials or your files;
@@ -479,7 +499,7 @@ The checks cannot find:
 - a brand-new attack;
 - harmful plain-language text in a skill.
 
-The Ollama library publishes no scan results. The sandbox does not block the network. An engine can read its own API key. Anyone with your user rights can change files and records.
+The Ollama library publishes no scan results. The sandbox does not block the network. An engine can read its own API key. Anyone with your user rights can change files and records. A model in the terminal can reach the services on `127.0.0.1`; set `auth key` so it needs the key for your models. Versions you choose yourself were not tested with this llmserver.
 
 ---
 
@@ -503,7 +523,7 @@ llmserver export -o engines.tar --with-engines
 llmserver install --from engines.tar
 ```
 
-A bundle is refused if any file is changed, missing or extra. To require signatures, set `LLMSERVER_TRUST_SIGNERS` to an ssh `allowed_signers` file (with namespace `llmserver-bundle`). With `strict`, signatures are required.
+The bundle carries the versions from your version settings, so B installs the same ones. A bundle is refused if any file is changed, missing or extra. To require signatures, set `LLMSERVER_TRUST_SIGNERS` to an ssh `allowed_signers` file (with namespace `llmserver-bundle`). With `strict`, signatures are required.
 
 **Behind a firewall,** use a mirror. Every file is still checked against its checksum.
 
@@ -582,14 +602,15 @@ SkillSpector gets a clean environment: no cloud keys, and never a hosted model. 
 
 ```bash
 llmserver install all -n          # show the plan
-llmserver install llama ollama    # or: vllm, runtime, webui, searxng
+llmserver install llama ollama    # or: vllm, runtime, webui, searxng, terminal
 llmserver versions                # what is installed
-llmserver upgrade                 # pinned versions of everything installed
+llmserver upgrade                 # your chosen versions, else the pinned ones, of everything installed
 llmserver upgrade llama --latest  # newest release, only if it publishes SHA-256 sums
+llmserver upgrade webui --latest  # newest Open WebUI on PyPI (back up first)
 llmserver rollback llama          # previous build (run again to go forward)
 ```
 
-Running models keep their engine until you restart them.
+Running models keep their engine until you restart them. `--latest` covers uv, llama.cpp, Ollama, vLLM, Open WebUI and Open Terminal; SearXNG stays at its pinned commit.
 
 | Engine | Pinned version | Build |
 |---|---|---|
@@ -597,6 +618,30 @@ Running models keep their engine until you restart them.
 | Ollama | v0.40.7 | Linux, plus ROCm libraries for AMD |
 | vLLM | 0.32.0 | CUDA (NVIDIA), ROCm 7.2.3 (AMD x86-64). Needs a GPU |
 | Runtime | uv 0.13.4, Python 3.14.8 | One build for all |
+| Open WebUI | 0.12.3 | CPU PyTorch |
+| Open Terminal | 0.17.20 | — |
+
+### Choose versions
+
+llmserver pins every version. To use another one, set it and upgrade:
+
+```bash
+llmserver backup                              # before a new Open WebUI: its database upgrade cannot be undone
+llmserver config set webui_version 0.13.4     # also: llama_version, ollama_version, vllm_version, webui_terminal_version
+llmserver upgrade webui
+llmserver webui restart
+```
+
+| Setting | Example | Source |
+|---|---|---|
+| `llama_version` | `b11798` | GitHub release |
+| `ollama_version` | `v0.40.7` | GitHub release |
+| `vllm_version` · `webui_version` · `webui_terminal_version` | `0.32.0` · `0.13.4` · `0.17.20` | PyPI |
+
+- A version setting wins over `--latest` and over the pin. `llmserver config unset webui_version` goes back to the pin.
+- For llama.cpp and Ollama, llmserver fetches the release's SHA-256 digests from GitHub once and keeps them in `pins.local`. A release without digests is refused.
+- Python packages are hash-locked at the first install of each version, as before.
+- `llmserver versions` lists the version settings in use. uv and SearXNG have no version setting.
 
 **Use your own engine:** `llmserver config set llama_source /opt/llama.cpp/build/bin`. The value can be `system` (the copy in `PATH`), a folder or a program. `vllm_source` and `ollama_source` work the same way. llmserver never changes your engine.
 
@@ -639,6 +684,8 @@ Values are read in this order; later ones win: `/etc/llmserver_env` → `~/.llms
 | `webui_tls_cert` · `webui_tls_key` | empty | HTTPS for Open WebUI |
 | `webui_rag` · `webui_reranker` | `hybrid` · `fast` | Document search |
 | `webui_search` · `webui_search_port` | `off` · `8888` | SearXNG web search |
+| `webui_terminal` · `webui_terminal_port` | `on` · `8889` | Open Terminal in Open WebUI: `on` (sandbox), `host` or `off` |
+| `llama_version` · `ollama_version` · `vllm_version` · `webui_version` · `webui_terminal_version` | empty (pinned) | The version to install ([Choose versions](#choose-versions)) |
 | `llama_source` · `vllm_source` · `ollama_source` | `managed` | Use your own engine |
 | `llama_build` | `auto` | `cpu`, `vulkan`, `cuda-12.8`, `cuda-13.4` |
 | `ready_timeout` · `stop_timeout` | `900` · `20` | Seconds |
@@ -658,7 +705,7 @@ llmserver stop all && llmserver webui stop && llmserver gateway stop
 llmserver restore ~/llmserver-backup.tar.gz
 ```
 
-A backup holds the settings, menu, keys, check records, ports, pins and skills, plus Open WebUI's accounts, chats and uploads. It does not hold engines or models; these download again.
+A backup holds the settings, menu, keys, check records, ports, pins and skills, plus Open WebUI's accounts, chats and uploads. It does not hold engines or models; these download again. It does not hold the terminal's workspace (`~/.llmserver/webui/terminal/home`): copy it yourself if you need it.
 
 **Move the home** to another disk:
 
@@ -693,6 +740,10 @@ Start with `llmserver doctor`, then `llmserver doctor --fix`. After a crash or p
 | `needs glibc 2.39` | `llmserver config set llama_build vulkan`, or use your own engine |
 | `bubblewrap does not work here` | Allow user namespaces, or set `sandbox auto` |
 | Documents fail in Open WebUI | The best reranker stopped: `llmserver webui restart` |
+| No terminal in Open WebUI | bubblewrap does not work: install it, or `config set webui_terminal host`. Port in use: `config set webui_terminal_port N`. Details in `logs/terminal.log` |
+| The model ignores the terminal | Use a model with tool calling and a context of 16k or more |
+| `publishes no SHA-256 digest for ...` | The release in `llama_version` or `ollama_version` has no digests on GitHub: choose a newer one, or `config unset` it |
+| `could not resolve Open WebUI X` | That version is not on PyPI or needs another Python: choose another, or `config unset webui_version` |
 | Other tools don't see the models | `llmserver models share on`, then log in again |
 | `writable by your group or other users` | `llmserver doctor --fix` |
 | A skill is refused with `S-SKILLSPECTOR` | Read the findings; `skills check NAME --json` has all of them. Accept only with `--accept-risk S-SKILLSPECTOR` |
@@ -763,7 +814,7 @@ The uninstall never touches:
 | `export` · `import` · `install --from` | Offline bundles |
 | `eval [MODEL]` · `versions [--sbom]` | Probes · versions and SBOM |
 | `hf ARGS…` | The pinned Hugging Face CLI |
-| `setup` · `install` · `upgrade` · `rollback` · `doctor` · `uninstall` | Life cycle |
+| `setup` · `install` · `upgrade [--latest]` · `rollback` · `doctor` · `uninstall` | Life cycle (components: runtime, llama, ollama, vllm, webui, searxng, terminal) |
 
 </details>
 
@@ -774,11 +825,12 @@ The uninstall never touches:
 |---|---|
 | `llmserver.env` | Settings (mode 600) |
 | `config/models` · `config/api-key` · `config/tuning` | Menu · API key (mode 600) · tuning rules |
-| `logs/` | `install.log`, `models/`, `gateway.log`, `webui.log`, `searxng.log`, `garak.log` |
+| `logs/` | `install.log`, `models/`, `gateway.log`, `webui.log`, `searxng.log`, `terminal.log`, `garak.log` |
 | `state/` | Running records, ports, pins, rollback records, sandbox caches, chat history |
 | `trust/records/` | Check records of models and skills |
 | `engines/` · `runtime/` · `python/` · `uv/` · `tools/` | Installed software |
-| `webui/` | Open WebUI data (accounts, chats, uploads) |
+| `webui/` | Open WebUI data (accounts, chats, uploads), and the terminal's workspace in `webui/terminal/home` |
+| `pins.local` | Newer pins from `upgrade --latest`, and the digests fetched for your version settings |
 | `skills/` | Agent skills |
 | `models/` | Model files, with `model_store private` only |
 
@@ -832,6 +884,7 @@ llmserver does not include the programs it installs. It downloads them on your c
 
 - **Open WebUI:** BSD-3-Clause with a branding clause. Keep the "Open WebUI" branding if more than 50 people use it in 30 days, unless you have an enterprise license.
 - **SearXNG:** AGPL-3.0. It is installed from its pinned source with its license; llmserver adds only a version file.
+- **Open Terminal** (MIT).
 - **llama.cpp** (MIT), **vLLM** (Apache-2.0), **Ollama** (MIT), **uv** (Apache-2.0 or MIT).
 - **NVIDIA SkillSpector** (Apache-2.0) is optional and not installed by llmserver. llmserver only calls it when you have installed it.
 - **Each model** has its own license. `llmserver trust show MODEL` shows it.

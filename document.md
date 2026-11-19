@@ -1,4 +1,4 @@
-# llmserver 2.7.5 — Operator manual
+# llmserver 2.8.1 — Operator manual
 
 This manual uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
 
@@ -84,8 +84,9 @@ From the operating system, llmserver needs only the GPU kernel driver. The Vulka
 - Each engine archive, uv and the helper packages of llmserver have a fixed version and a fixed SHA-256 checksum in the script.
 - llmserver does a check of each file before it uses the file. If the checksum is not correct, llmserver deletes the file. It does not install it.
 - llmserver uses HTTPS only.
-- Python packages come from lock files that contain a checksum for each file. For vLLM, Open WebUI, SearXNG and garak, llmserver makes the lock file from the package servers at the first installation (the main package has a fixed version). Later installations, rebuilds and bundles use the same lock file. A package that was changed on the server before the first installation is not found. `llmserver versions --sbom` lists each locked package, for a vulnerability scanner.
+- Python packages come from lock files that contain a checksum for each file. For vLLM, Open WebUI, SearXNG, Open Terminal and garak, llmserver makes the lock file from the package servers at the first installation (the main package has a fixed version). Later installations, rebuilds and bundles use the same lock file. A package that was changed on the server before the first installation is not found. `llmserver versions --sbom` lists each locked package, for a vulnerability scanner.
 - llmserver records a checksum of each engine after installation. Then it can find changes to the engine later.
+- If you set a different version of llama.cpp or Ollama (see [3.38](#338-choose-the-versions)), llmserver gets the SHA-256 checksums of that release from GitHub one time and keeps them in `pins.local`. It does not install a release that has no checksums.
 - Before llmserver downloads a model, it reads the Hugging Face scan results of each file. It downloads only the files that the engine needs, at a fixed commit, and does a check of each file. See [4](#4-control-the-security-of-models-and-skills).
 
 ### 1.5 Notices in this manual
@@ -121,6 +122,10 @@ The changes of 2.7.4 were tested with the real NVIDIA SkillSpector 2.12.0 and a 
 The quantization change of 2.7.5 was tested with the real Hugging Face: `model add` of `google/gemma-4-E4B-it-qat-q4_0-gguf` (only Q4_0) with llama.cpp, and of a Google QAT repository with Ollama (`hf.co/...`), added with `:Q4_0`; the same entry a second time (not added again); a repository with many quantizations and a wrong one (nothing added, the full name shown); and `trust check` without a quantization (refused, the full name shown).
 
 The admin account question of 2.7.5 was tested with the real Open WebUI 0.12.3 in a terminal (a pseudo-terminal): a password that was too short, the account created before the start, a log-in with it, Open WebUI on `0.0.0.0` on the first start, `webui admin` when an account exists, and the skip (Enter), which kept the start on `127.0.0.1`.
+
+The terminal of 2.8.0 was tested with the real Open WebUI 0.12.3 and the real Open Terminal 0.17.20, in a real bubblewrap sandbox: the installation (48 locked packages), the connection in Open WebUI for an administrator and for a normal user, commands through Open WebUI, the sandbox (the home folder and the data of Open WebUI not visible, the system read-only, only its own processes, the workspace kept after a restart), a change of the administrator kept after a restart, `webui_terminal off` (only the connection of llmserver removed), `host`, the refusal without the sandbox, `webui stop`, `ps`, `status`, `versions` and the SBOM. A real llama.cpp model (Qwen3-0.6B, CPU) got the tools of the terminal from Open WebUI. That small model did not call a tool, so a command that a model started was not tested.
+
+The version settings of 2.8.1 were tested in a test home: `config set`, `get`, `list` and `unset` for each setting, the refusal of incorrect values, and the installation plan with the versions from the settings. The checksums of llama.cpp and Ollama releases were tested with a simulated GitHub: the files of the CUDA build and its `cudart` file, a second installation without a new request, a release without checksums (refused) and a release that does not exist (refused). `upgrade webui --latest` and `upgrade terminal --latest` were tested with the real PyPI. The lock file of Open WebUI 0.13.4 was made for Python 3.12 with CPU PyTorch (242 packages). A real download from GitHub and a start of Open WebUI 0.13.x with the settings of llmserver were not tested.
 
 The vLLM installation method was tested on a small package only. GPU operation was tested with simulated GPUs only. Before your first real start, use `llmserver check`, `llmserver capacity` and `--dry-run`.
 
@@ -175,7 +180,7 @@ Make sure that the computer agrees with these requirements:
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.7.5`.
+   Result: The command shows `llmserver 2.8.1`.
 
 ### 2.3 Do the setup
 
@@ -210,7 +215,7 @@ Make sure that the computer agrees with these requirements:
 
 > **NOTE:** You can do the setup again at any time. The setup does not delete your menu. It keeps your engine variables in `~/.llmserver/llmserver.env`.
 
-> **NOTE:** At the end, the setup asks if it must install Open WebUI, a web chat for people on your network, who can use it, and if it must also search the web. See [3.30](#330-give-people-on-the-network-a-web-chat-open-webui).
+> **NOTE:** At the end, the setup asks if it must install Open WebUI, a web chat for people on your network, who can use it, and if it must also search the web. See [3.30](#330-give-people-on-the-network-a-web-chat-open-webui). Open WebUI comes with a terminal for the models (see [3.37](#337-let-the-models-use-a-terminal-open-terminal)).
 
 ### 2.4 Start your first model
 
@@ -341,6 +346,8 @@ See [3.28](#328-chat-with-a-model) for more.
 > **NOTE:** llmserver selects the build for your GPUs (see [6.8](#68-engine-builds)). To select a different llama.cpp build, set `LLMSERVER_LLAMA_BUILD` in `~/.llmserver/llmserver.env`.
 
 > **NOTE:** If you start a model and its engine is not installed, llmserver asks you to install it.
+
+> **NOTE:** llmserver installs the versions that it specifies. To install a different version, see [3.38](#338-choose-the-versions).
 
 ### 3.3 Add, remove and change the models in the menu
 
@@ -773,13 +780,13 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
 
 ### 3.20 Update the engines
 
-1. Install the versions that this llmserver release specifies:
+1. Install the versions in the version settings (see [3.38](#338-choose-the-versions)), or the versions that this llmserver release specifies:
 
    ```bash
    llmserver upgrade
    ```
 
-   Result: llmserver updates the runtime and each component that is installed: the engines in the llmserver home, Open WebUI and SearXNG. It does not install a component that is not installed. It deletes the older version of Open WebUI and SearXNG when they do not operate.
+   Result: llmserver updates the runtime and each component that is installed: the engines in the llmserver home, Open WebUI, SearXNG and Open Terminal. It does not install a component that is not installed. It deletes the older version of Open WebUI, SearXNG and Open Terminal when they do not operate.
 
 2. To install the newest version of an engine, use `--latest`:
 
@@ -797,7 +804,11 @@ If you downloaded the llama.cpp or Ollama release file yourself (for example, on
 
 > **NOTE:** Models that operate keep the old engine until you start them again.
 
-> **NOTE:** `--latest` applies to uv, llama.cpp, Ollama and vLLM. Open WebUI and SearXNG stay at the versions that the script specifies. A new llmserver release brings new versions.
+> **NOTE:** `--latest` applies to uv, llama.cpp, Ollama, vLLM, Open WebUI and Open Terminal. For vLLM, Open WebUI and Open Terminal, llmserver gets the newest version from PyPI. SearXNG stays at the commit that the script specifies.
+
+> **NOTE:** If a component has a version setting, `--latest` does not change it and tells you. To follow `--latest`, remove the setting, for example `llmserver config unset webui_version`.
+
+> **CAUTION:** A newer Open WebUI was not tested with this llmserver, and it changes its database at the first start. You cannot undo this change. Make a backup before you upgrade it (see [3.35](#335-back-up-and-restore-the-settings-and-the-data)).
 
 > **NOTE:** To go back to the old engine, see [7.4](#74-go-back-to-the-previous-engine-build).
 
@@ -1166,7 +1177,7 @@ Open WebUI is a web chat. People open it in a browser, log in, select one of the
    llmserver webui
    ```
 
-   Result: The first time, llmserver asks to install Open WebUI 0.12.3 (about 2.5 GB, with CPU PyTorch) into `~/.llmserver/tools`. Then it starts the gateway (see [3.33](#333-use-one-address-for-all-models-the-gateway)) and Open WebUI, and shows the address, for example `http://192.168.1.20:3000`.
+   Result: The first time, llmserver asks to install Open WebUI 0.12.3 (about 2.5 GB, with CPU PyTorch) into `~/.llmserver/tools`. Then it starts the gateway (see [3.33](#333-use-one-address-for-all-models-the-gateway)), Open Terminal (see [3.37](#337-let-the-models-use-a-terminal-open-terminal)) and Open WebUI, and shows the address, for example `http://192.168.1.20:3000`.
 
 2. Create the administrator account. On the first start (also from `llmserver setup`), llmserver asks for it in the terminal before Open WebUI starts: an email (to log in; llmserver does not send it anywhere), a name and a password (8 or more characters, typed two times, not shown).
 
@@ -1223,13 +1234,15 @@ llmserver sets up Open WebUI for safe use on a network:
 - It accepts forwarded client addresses (`X-Forwarded-For`) only from this computer, so a client cannot hide its address.
 - It cannot fetch web pages on this computer or on your private network, for example when a person gives it a link.
 
-Documents and web search: see [3.31](#331-find-answers-in-documents-hybrid-search) and [3.32](#332-search-the-web-from-the-chat-searxng).
+Documents and web search: see [3.31](#331-find-answers-in-documents-hybrid-search) and [3.32](#332-search-the-web-from-the-chat-searxng). The terminal: see [3.37](#337-let-the-models-use-a-terminal-open-terminal).
 
 > **NOTE:** The accounts, chats and uploads are in `~/.llmserver/webui/data`. `llmserver uninstall --keep-config` keeps them.
 
+> **NOTE:** llmserver installs Open WebUI 0.12.3. To install a different version, see [3.38](#338-choose-the-versions).
+
 > **NOTE:** Open WebUI has its own license. You must keep its "Open WebUI" branding if more than 50 people use it in 30 days, unless you have an enterprise license.
 
-> **NOTE:** `llmserver webui stop` stops Open WebUI, and SearXNG, the best reranker and the gateway if `webui start` started them. A gateway that you started yourself continues to operate.
+> **NOTE:** `llmserver webui stop` stops Open WebUI, and SearXNG, Open Terminal, the best reranker and the gateway if `webui start` started them. A gateway that you started yourself continues to operate.
 
 #### Use HTTPS
 
@@ -1457,6 +1470,8 @@ A backup contains what llmserver cannot download again: the settings, the menu, 
 
 > **NOTE:** On a different computer, install the engines first (`llmserver install`). The models download again at their first start.
 
+> **NOTE:** The backup does not contain the workspace of the terminal (`~/.llmserver/webui/terminal/home`). Copy it yourself if you need its files. The key of the terminal is in `config/`, so the backup contains it.
+
 ### 3.36 Keep the model files in the home and share them with other tools
 
 By default, the model files are in the shared caches (`~/.cache/huggingface/hub` and `~/.ollama/models`). With `LLMSERVER_MODEL_STORE=private`, they are in `~/.llmserver/models`. Other tools (the `hf` command, Python programs that use Hugging Face, Ollama) do not find them there.
@@ -1534,6 +1549,115 @@ if [ -d '/home/you/.llmserver/models/ollama' ]; then export OLLAMA_MODELS='/home
 > **CAUTION:** Other tools can now write to `~/.llmserver/models` and delete from it. llmserver finds a changed model file at the next start, because it compares the file with its check record. Then it asks again or refuses. `models prune` and `uninstall --purge-models` delete only the files that llmserver downloaded.
 
 Why not links: a link such as `~/.cache` to `~/.llmserver/.cache` puts the files of all your programs (settings, keys, browser data) into the llmserver home. `uninstall` and `restore` would then delete or replace them, and the sandbox would have them in its folder. Two variables give the same result for the model files and nothing more.
+
+### 3.37 Let the models use a terminal (Open Terminal)
+
+Open Terminal gives the models in Open WebUI a computer to work on. A model can run commands, write and edit files, and run code. People see the files and the terminal next to the chat. llmserver installs Open Terminal with Open WebUI and starts it with Open WebUI.
+
+> **CAUTION:** A model in the terminal runs the commands that it decides on. A person in the chat, or a document or web page that the model reads, can tell the model what to do. Do not put secrets or files that you must keep in the workspace. Use the sandbox (`webui_terminal on`).
+
+1. Start Open WebUI as usual:
+
+   ```bash
+   llmserver webui
+   ```
+
+   Result: llmserver installs Open Terminal 0.17.20 (about 80 MB) the first time. It starts Open Terminal on `127.0.0.1:8889` in the sandbox, then starts Open WebUI. Open WebUI gets the address and the key of the terminal. The line `terminal:` shows the state.
+
+2. In a chat, click the terminal button and select **Open Terminal (llmserver)**. Then ask the model to do a task, for example "make a CSV file of the first 20 prime numbers".
+
+   Result: The model runs commands in the terminal. The files show in the file browser of the chat.
+
+   > **NOTE:** The model must support tool calling. With llama.cpp, the default flag `--jinja` turns it on. A small model can ignore the terminal. The terminal adds about 8,800 tokens to each request: use a context of 16384 tokens or more.
+
+3. To turn off the terminal:
+
+   ```bash
+   llmserver config set webui_terminal off
+   llmserver webui restart
+   ```
+
+   Result: llmserver removes the terminal from Open WebUI and does not start Open Terminal.
+
+The sandbox of the terminal:
+
+- The system is read-only. The terminal can use the programs of the system, for example `git`, `python3` and `curl`.
+- Its home folder is the workspace, `~/.llmserver/webui/terminal/home`. It can write only there and in a private `/tmp`. The workspace stays after a restart.
+- Your home folder, the settings, the API key and the data of Open WebUI are not visible.
+- It sees only its own processes. The folder of your session sockets is empty.
+- It has network access, for example for `pip install --user` and `git clone`. It gets the proxy settings of llmserver.
+- It listens on `127.0.0.1` only. People on the network use it through Open WebUI. Open WebUI sends a private key (`config/terminal-key`, mode 600) with each request.
+- Open Terminal reads its settings only from llmserver (`--isolated`). A command in the terminal cannot change them.
+
+| `LLMSERVER_WEBUI_TERMINAL` | Result |
+|---|---|
+| `on` (default) | The terminal operates in the sandbox. If bubblewrap does not work, or `LLMSERVER_SANDBOX=off`, Open WebUI starts without a terminal and llmserver tells you |
+| `host` | The terminal operates without the sandbox, with all your user rights. A model can read and change all your files |
+| `off` | No terminal |
+
+> **CAUTION:** All accounts use the same workspace and the same terminal. A person can see and change the files of other people. To give the terminal to some people only, open **Settings > Admin > Integrations > Open Terminal** in Open WebUI and change who can use **Open Terminal (llmserver)**. llmserver keeps your change until you change a `webui_terminal` setting.
+
+> **NOTE:** Open Terminal has a mode with one workspace for each person. That mode makes Linux accounts and needs root, so llmserver does not use it.
+
+> **NOTE:** The desktop of Open Terminal is off. It needs desktop packages of the system.
+
+> **NOTE:** If the port is in use, Open WebUI starts without the terminal and llmserver tells you. Set a different port with `llmserver config set webui_terminal_port N`.
+
+### 3.38 Choose the versions
+
+Each component has a version setting. When the setting is empty (the default), llmserver uses the version that it specifies, or a newer version from `upgrade --latest`. A version in the setting has priority over both.
+
+| Setting | Example | Component |
+|---|---|---|
+| `LLMSERVER_LLAMA_VERSION` | `b11798` | llama.cpp (a GitHub release) |
+| `LLMSERVER_OLLAMA_VERSION` | `v0.40.7` | Ollama (a GitHub release) |
+| `LLMSERVER_VLLM_VERSION` | `0.32.0` | vLLM (a PyPI version) |
+| `LLMSERVER_WEBUI_VERSION` | `0.13.4` | Open WebUI (a PyPI version) |
+| `LLMSERVER_WEBUI_TERMINAL_VERSION` | `0.17.20` | Open Terminal (a PyPI version) |
+
+> **CAUTION:** llmserver was tested only with the versions that it specifies. Open WebUI changes its database at its first start, and you cannot undo this change. Make a backup first.
+
+1. Make a backup:
+
+   ```bash
+   llmserver backup
+   ```
+
+2. Set the version:
+
+   ```bash
+   llmserver config set webui_version 0.13.4
+   ```
+
+   Result: llmserver does a check of the form of the value and writes it to `llmserver.env`. It tells you the next command.
+
+3. Install it:
+
+   ```bash
+   llmserver upgrade webui
+   llmserver webui restart
+   ```
+
+   Result: llmserver installs Open WebUI 0.13.4 into `tools/open-webui/0.13.4`, with a new lock file. It tells you that this version was not tested. After the restart, do a check of the settings in **Settings > Admin**.
+
+4. To go back to the version that llmserver specifies:
+
+   ```bash
+   llmserver config unset webui_version
+   llmserver upgrade webui
+   ```
+
+   > **NOTE:** If Open WebUI changed its database, also restore the backup (`llmserver restore FILE`).
+
+For llama.cpp and Ollama, llmserver gets the SHA-256 checksums of the release files from GitHub one time, and keeps them in `pins.local`. If the release has no checksums, llmserver does not install it.
+
+> **NOTE:** For llama.cpp and Ollama, you can write the version without its first letter: `12000` is `b12000`, and `0.41.0` is `v0.41.0`.
+
+> **NOTE:** Models that operate keep the old engine until you start them again with `--restart`.
+
+> **NOTE:** `llmserver versions` shows the version settings that llmserver uses.
+
+> **NOTE:** uv and SearXNG have no version setting. They use the specified version, or `upgrade --latest` for uv.
 
 ---
 
@@ -1826,6 +1950,8 @@ On computer B:
 
 > **NOTE:** The bundle is for one CPU architecture and one llmserver version. llmserver refuses other combinations.
 
+> **NOTE:** The bundle contains the versions from the version settings of computer A (see [3.38](#338-choose-the-versions)). Computer B installs the same versions without these settings.
+
 > **NOTE:** A vLLM bundle is large (10 GB or more), because it contains PyTorch and the CUDA or ROCm libraries.
 
 ### 4.14 Sign and verify bundles
@@ -1974,6 +2100,9 @@ The checks do not find all problems:
 - A person with your user rights can change the files and the records.
 - Without bubblewrap, an engine runs with all your user rights. With bubblewrap, it can still use the network.
 - The engine gets its API key in its environment, so code in a model can read that key.
+- A model in the terminal runs commands. In the sandbox, it can use the network and the services on `127.0.0.1` (the gateway, the models, Open WebUI). Without a key on `127.0.0.1` (`LLMSERVER_AUTH=auto`), it can use the models. Use `LLMSERVER_AUTH=key` to prevent this.
+- With `webui_terminal host`, a model has all your user rights.
+- A version that you set with a version setting was not tested with this llmserver.
 
 ---
 
@@ -2072,6 +2201,15 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `the X engine is not installed` | The engine is not in the llmserver home | Type `llmserver install X` |
 | `does not match its pinned checksum` | The file on the server is different | Nothing was installed. Try again later or from a different network |
 | `publishes no SHA-256 digests` | `upgrade --latest` cannot verify the release | Keep the specified version |
+| `publishes no SHA-256 digest for FILE, so it cannot be verified` | The release in a version setting has no checksums on GitHub (often an old release) | Set a newer release, or type `llmserver config unset llama_version` (or `ollama_version`) |
+| `llama.cpp has no release ... on GitHub` (or Ollama) | The version in the setting does not exist | Find the name of the release on GitHub, or remove the setting |
+| `could not resolve Open WebUI X` (or vLLM, Open Terminal) | The version is not on PyPI, or it needs a different Python | Set a different version, or remove the setting |
+| `... is set and wins over --latest` | A version setting is set | No action. To follow `--latest`, remove the setting |
+| `Open Terminal runs only in the sandbox ... so Open WebUI has no terminal` | `webui_terminal on`, and bubblewrap does not work or `LLMSERVER_SANDBOX=off` | Install bubblewrap (see [4.17](#417-isolate-the-engines)). Or type `llmserver config set webui_terminal host` (no sandbox) or `off` |
+| `port 8889 ... is in use, so Open WebUI has no terminal` | An other program uses the port | Type `llmserver config set webui_terminal_port N`, then `llmserver webui restart` |
+| `Open Terminal did not start` | Open Terminal stopped at the start | Read `logs/terminal.log` |
+| `Open Terminal is not running, so the terminal fails` (`webui status`) | Open Terminal stopped | Type `llmserver webui restart` |
+| The model does not use the terminal | The model has no tool calling, or the request is longer than its context | Use a model with tool calling and a context of 16384 tokens or more |
 | `writable by your group or other users` | The permissions of a file or folder in the llmserver home changed | Type `llmserver doctor --fix`. It removes the write permission and does not download again |
 | `owned by` another user | A file in the llmserver home is not yours | Remove that file, or type `llmserver uninstall` and install again |
 | `has changed since it was installed` | The checksum of an engine program changed | Type `llmserver doctor --fix` |
@@ -2194,8 +2332,8 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `eval [MODEL]` | Probes a running model for prompt injection and system prompt leaks. `--garak` also runs garak |
 | `hf ARGS...` | Starts the fixed Hugging Face CLI. `--link` and `--unlink` add or remove `~/.local/bin/hf` |
 | `setup` | Does the setup |
-| `install [COMPONENT...]` | Installs `runtime`, `llama`, `ollama`, `vllm`, `all` (the engines), `webui` or `searxng` |
-| `upgrade [COMPONENT]` | Installs the specified versions of the installed components (or of `runtime`, `llama`, `ollama`, `vllm`, `webui`, `searxng`), or with `--latest` the newest verified versions |
+| `install [COMPONENT...]` | Installs `runtime`, `llama`, `ollama`, `vllm`, `all` (the engines), `webui`, `searxng` or `terminal` |
+| `upgrade [COMPONENT]` | Installs the versions in the version settings, or the specified versions, of the installed components (or of `runtime`, `llama`, `ollama`, `vllm`, `webui`, `searxng`, `terminal`). With `--latest`, the newest verified versions |
 | `rollback COMPONENT` | Goes back to the previous build |
 | `versions` | Shows what is installed |
 | `doctor` | Does a check of llmserver. `--fix` repairs. `--deep` also compares the checksums of the model files |
@@ -2232,7 +2370,7 @@ If llmserver stops unexpectedly (for example `kill -9` or a power failure), do t
 | `--garak`, `--probes LIST` | Also runs garak, with these probes (`eval`) |
 | `--force` | Replaces or removes a changed skill, or a skill that llmserver did not install (`skills`) |
 | `--fix` | Repairs (`doctor`) |
-| `--latest` | Uses the newest verified versions (`upgrade`) |
+| `--latest` | Uses the newest verified versions (`upgrade`). Components with a version setting do not change |
 | `-y`, `--yes` | Accepts without a question (`setup`, `install`, `uninstall`, `restore`, `models prune`, security warnings). It does not approve the Python code of a model. With `chat`, it only starts the model: security warnings of that model still need an answer |
 | `-v`, `--verbose` | Shows more details |
 | `--runs N`, `--long N`, `--gen N`, `--history` | Controls `bench` |
@@ -2297,6 +2435,8 @@ Put the settings in `~/.llmserver/llmserver.env`.
 | `LLMSERVER_WEBUI_RAG` | `hybrid` | `hybrid` (keywords and meaning, then the reranker) or `vector` (see [3.31](#331-find-answers-in-documents-hybrid-search)) |
 | `LLMSERVER_WEBUI_RERANKER` | `fast` | `fast` (CPU), `best` (bge-reranker-v2-m3 on llama.cpp) or `off` |
 | `LLMSERVER_WEBUI_SEARCH`, `_WEBUI_SEARCH_PORT` | `off`, `8888` | Web search through a private SearXNG on `127.0.0.1` (see [3.32](#332-search-the-web-from-the-chat-searxng)) |
+| `LLMSERVER_WEBUI_TERMINAL`, `_WEBUI_TERMINAL_PORT` | `on`, `8889` | The terminal in Open WebUI: `on` (sandbox), `host` (no sandbox) or `off`; its port on `127.0.0.1` (see [3.37](#337-let-the-models-use-a-terminal-open-terminal)) |
+| `LLMSERVER_LLAMA_VERSION`, `_OLLAMA_VERSION`, `_VLLM_VERSION`, `_WEBUI_VERSION`, `_WEBUI_TERMINAL_VERSION` | empty (the specified version) | The version that `install` and `upgrade` install (see [3.38](#338-choose-the-versions)) |
 | `LLMSERVER_SANDBOX_RW` | empty | More folders that the engines can write in the sandbox (absolute paths) |
 | `LLMSERVER_SCANNERS` | `auto` | `auto` uses `clamscan`, `modelscan` and `gitleaks` if they are on `PATH`. `off` (also stops SkillSpector) |
 | `LLMSERVER_SKILLSPECTOR` | `auto` | `auto` uses NVIDIA SkillSpector for marketplace skills if it is on `PATH`. `off`. Or the full path of the program |
@@ -2332,12 +2472,12 @@ All paths in the first table are in the llmserver home, `~/.llmserver` (mode 700
 | `logs/install.log` | The activity log |
 | `logs/models/` | The output of each model |
 | `logs/ollama-pull.log`, `logs/garak.log` | The output of Ollama downloads and of garak |
-| `logs/gateway.log`, `logs/webui.log`, `logs/searxng.log` | The requests through the gateway (no message text), and the output of Open WebUI and SearXNG |
-| `state/services/` | One record each for the gateway, Open WebUI and SearXNG when they operate. `gateway-menu.tsv`: the menu models that the gateway can start |
-| `webui/` | Open WebUI: `data/` (accounts, chats, uploads), its embedding model and reranker, its home folder, the generated SearXNG settings, and `llmserver-applied.json` (the values llmserver last wrote into its settings) |
-| `config/webui-secret`, `config/searxng-secret` | The secret keys of Open WebUI and SearXNG (mode 600) |
+| `logs/gateway.log`, `logs/webui.log`, `logs/searxng.log`, `logs/terminal.log` | The requests through the gateway (no message text), and the output of Open WebUI, SearXNG and Open Terminal |
+| `state/services/` | One record each for the gateway, Open WebUI, SearXNG and Open Terminal when they operate. `gateway-menu.tsv`: the menu models that the gateway can start |
+| `webui/` | Open WebUI: `data/` (accounts, chats, uploads), its embedding model and reranker, its home folder, the generated SearXNG settings, the workspace of the terminal (`terminal/home`), and `llmserver-applied.json` (the values llmserver last wrote into its settings) |
+| `config/webui-secret`, `config/searxng-secret`, `config/terminal-key` | The secret keys of Open WebUI and SearXNG, and the key of Open Terminal (mode 600) |
 | `config/searxng.yml` | Your SearXNG settings, if you made this file. Else llmserver writes its own |
-| `tools/open-webui/`, `tools/searxng/` | Open WebUI and SearXNG with their Python packages, only after you install them |
+| `tools/open-webui/`, `tools/searxng/`, `tools/open-terminal/` | Open WebUI, SearXNG and Open Terminal with their Python packages, only after you install them |
 | `state/running/` | One record for each model that operates |
 | `state/ports`, `state/pins` | The port of each model, and the pinned models |
 | `state/rollback.*` | Records of models that a start stopped |
@@ -2347,7 +2487,7 @@ All paths in the first table are in the llmserver home, `~/.llmserver` (mode 700
 | `trust/records/skill/` | One record (JSON) for each installed skill, with the checksum of each file and its links |
 | `engines/`, `runtime/`, `python/`, `uv/`, `bin/` | The engines, the helper runtime, Python and uv |
 | `tools/garak/` | garak and its results, only after `llmserver eval --garak` |
-| `pins.local` | Newer pins from `llmserver upgrade --latest` |
+| `pins.local` | Newer pins from `llmserver upgrade --latest`, the SHA-256 checksums of the releases in the version settings, and the ROCm wheel tag of each vLLM version |
 | `cache/`, `tmp/`, `locks/` | Downloads, work files and locks of llmserver |
 | `models/` | The model files, only with `LLMSERVER_MODEL_STORE=private`. Other tools use it too after `models share on` |
 | `.llmserver-home` | The marker file. llmserver deletes or changes only a folder with this file |
@@ -2390,6 +2530,10 @@ Other paths:
 | Ollama | v0.40.7 | The Linux build, plus the ROCm libraries for AMD GPUs |
 | vLLM | 0.32.0 | CUDA for NVIDIA. ROCm 7.2.3 for AMD on x86-64. vLLM is not available without a GPU |
 | Runtime | uv 0.13.4, Python 3.14.8 | One build for all computers |
+| Open WebUI | 0.12.3 | CPU PyTorch, Python 3.12.15 |
+| Open Terminal | 0.17.20 | Python 3.12.15 |
+
+To install a different version, see [3.38](#338-choose-the-versions).
 
 ### 6.9 Exit status
 
@@ -2411,7 +2555,7 @@ Other paths:
 - Each model name operates one time. To operate the same model two times, for example with different contexts, is not possible.
 - The memory plan is an estimate. For vLLM it can be too low; then vLLM stops at the start and llmserver tells you.
 - With MIG, llmserver counts the memory of the whole GPU.
-- Open WebUI and SearXNG change only with a new llmserver release.
+- SearXNG changes only with a new llmserver release. Versions from the version settings were not tested with this llmserver.
 - The security checks have limits (see [4.19](#419-limits-of-the-security-checks)).
 
 ### 6.11 Security rules
@@ -2549,17 +2693,25 @@ If llmserver itself stopped during the start, do the procedure in [5.2](#52-reco
 
 ### 7.5 Go back to the specified versions
 
-1. Delete the file of newer versions:
+1. Remove the version settings that you set, for example:
+
+   ```bash
+   llmserver config unset webui_version
+   ```
+
+2. Delete the file of newer versions:
 
    ```bash
    rm ~/.llmserver/pins.local
    ```
 
-2. Install the specified versions:
+3. Install the specified versions:
 
    ```bash
    llmserver upgrade
    ```
+
+> **NOTE:** If a newer Open WebUI changed its database, also restore a backup from before the upgrade (see [3.35](#335-back-up-and-restore-the-settings-and-the-data)).
 
 ### 7.6 Repair an engine
 

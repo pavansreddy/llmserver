@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-readonly PROG=llmserver VERSION=2.7.5
+readonly PROG=llmserver VERSION=2.8.1
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "$PROG: bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 1
 fi
@@ -310,7 +310,9 @@ Usage:
                               first use, about 2.5 GB): accounts, every running model, chats.
                               Documents: hybrid search (keywords + meaning) and a reranker
                               (webui_rag, webui_reranker fast|best|off); web search through a
-                              private SearXNG with 'config set webui_search on'
+                              private SearXNG with 'config set webui_search on'. A terminal where
+                              models run commands and edit files (Open Terminal, every account,
+                              in the sandbox in its own workspace; 'config set webui_terminal off')
   $PROG gateway [start|stop|status]
                               one OpenAI-compatible address (default http://127.0.0.1:8000/v1)
                               for every running model; Open WebUI uses it, other clients may too.
@@ -323,12 +325,15 @@ Usage:
   $PROG setup                 choose engines, network, auth, context and limits; installs what
                               is needed into LLMSERVER_HOME
   $PROG install [COMPONENT...]
-                              install runtime, llama, ollama, vllm, all (the engines), webui or searxng
+                              install runtime, llama, ollama, vllm, all (the engines), webui, searxng
+                              or terminal
                               into LLMSERVER_HOME
                               (pinned versions, SHA-256 verified; asks first)
   $PROG upgrade [COMPONENT] [--latest]
-                              move to this llmserver's pinned versions, or with --latest to the
-                              newest upstream release that publishes checksums
+                              move to the versions in the settings (LLMSERVER_*_VERSION, else
+                              this llmserver's pins), or with --latest to the newest upstream
+                              release that publishes checksums (PyPI for vLLM, Open WebUI and
+                              Open Terminal)
   $PROG rollback COMPONENT    go back to the previously installed build
   $PROG versions [--json]     what is installed, from where, and the previous builds
   $PROG versions --sbom       a CycloneDX software bill of materials of everything llmserver
@@ -720,7 +725,7 @@ for v in "$b_runs" "$b_gen" "${b_long:-0}" "$l_lines"; do [[ $v =~ ^[0-9]+$ ]] |
 declare -A CFG=(
   [ENGINES]=""                # engines enabled in setup, space-separated
   [DEFAULT_ENGINE]=""         # engine for Hugging Face repos when it cannot be inferred
-  [HOST]=127.0.0.1            # bind address
+  [HOST]=127.0.0.1
   [PORT]=8080                 # first port; each model gets its own, counting up from here
   [PORT_SPAN]=100             # how many ports above PORT may be handed out
   [AUTH]=auto                 # auto (key unless bound to loopback) | key | none
@@ -767,6 +772,14 @@ declare -A CFG=(
   [WEBUI_RERANKER]=fast       # fast (small, on the CPU) | best (bge-reranker-v2-m3 on llama.cpp, GPU) | off
   [WEBUI_SEARCH]=off          # on: web search through a private SearXNG (the questions go to public search engines) | off
   [WEBUI_SEARCH_PORT]=8888    # SearXNG's port, on 127.0.0.1 only (only Open WebUI uses it)
+  [WEBUI_TERMINAL]=on         # Open Terminal in Open WebUI, for every account: on (in the sandbox, its own workspace) | host (no sandbox: your full user rights) | off
+  [WEBUI_TERMINAL_PORT]=8889  # Open Terminal's port, on 127.0.0.1 only (Open WebUI reaches it for its users)
+  # versions that 'install' and 'upgrade' use; empty = the pin (or a newer one from 'upgrade --latest')
+  [LLAMA_VERSION]=""          # a release tag, e.g. b11798
+  [OLLAMA_VERSION]=""         # a release tag, e.g. v0.40.7
+  [VLLM_VERSION]=""           # PyPI versions from here on
+  [WEBUI_VERSION]=""
+  [WEBUI_TERMINAL_VERSION]=""
   [READY_TIMEOUT]=900         # seconds to wait for a new server to become healthy
   [STOP_TIMEOUT]=20           # seconds between SIGTERM and SIGKILL
   [LOG_LEVEL]=info            # info | debug  (install.log detail)
@@ -777,7 +790,8 @@ for _k in "${!CFG[@]}"; do DEFAULT_CFG[$_k]=${CFG[$_k]}; done; unset _k
 readonly CFG_ORDER=(ENGINES DEFAULT_ENGINE HOST PORT PORT_SPAN AUTH ALLOW_INSECURE CTX MAX_MODELS EVICT GPUS
   LLAMA_FLAGS VLLM_FLAGS OLLAMA_ATTACH OLLAMA_KEEP_ALIVE DRAFT_N NUMA TUNING VRAM_GUARD VRAM_RESERVE_MB VERIFY
   READY_TIMEOUT STOP_TIMEOUT LOG_LEVEL LOG_MAX_MB LLAMA_SOURCE VLLM_SOURCE OLLAMA_SOURCE LLAMA_BUILD AUTO_INSTALL
-  SECURITY ALLOW_PICKLE LOCK_MODELS SKILLS SCANNERS SKILLSPECTOR SKILLS_REVIEW TRUST_SIGNERS SANDBOX GATEWAY_HOST GATEWAY_PORT GATEWAY_AUTOLOAD GATEWAY_IDLE_STOP WEBUI WEBUI_HOST WEBUI_PORT WEBUI_AUTH WEBUI_TLS_CERT WEBUI_TLS_KEY WEBUI_RAG WEBUI_RERANKER WEBUI_SEARCH WEBUI_SEARCH_PORT)
+  SECURITY ALLOW_PICKLE LOCK_MODELS SKILLS SCANNERS SKILLSPECTOR SKILLS_REVIEW TRUST_SIGNERS SANDBOX GATEWAY_HOST GATEWAY_PORT GATEWAY_AUTOLOAD GATEWAY_IDLE_STOP WEBUI WEBUI_HOST WEBUI_PORT WEBUI_AUTH WEBUI_TLS_CERT WEBUI_TLS_KEY WEBUI_RAG WEBUI_RERANKER WEBUI_SEARCH WEBUI_SEARCH_PORT WEBUI_TERMINAL WEBUI_TERMINAL_PORT
+  LLAMA_VERSION OLLAMA_VERSION VLLM_VERSION WEBUI_VERSION WEBUI_TERMINAL_VERSION)
 readonly PATH_KEYS=(MODEL_STORE SYSFS PROCFS DEVFS OLLAMA_REGISTRY SYS_ENV_FILE
   HOME GITHUB GITHUB_API PYPI VLLM_ROCM_INDEX FLASHINFER_INDEX SECURITY_FLOOR SKILLS_MIRROR SANDBOX_RW)
 have_config=0
@@ -855,6 +869,21 @@ LLMSERVER_AUTO_INSTALL=$(env_val "${CFG[AUTO_INSTALL]}")
 # LLMSERVER_GITHUB=https://github.com        (a mirror works: every file is checked against its pinned SHA-256)
 # LLMSERVER_PYPI=https://pypi.org            (a Python package mirror; hashes are still enforced)
 
+## Versions ('$PROG upgrade' moves to them; '$PROG versions' shows what is installed)
+# Empty = the version this llmserver pins (or a newer one recorded by 'upgrade --latest').
+# A version set here wins over both. llama.cpp and Ollama files are checked against the SHA-256
+# digests that GitHub publishes for that release (fetched once, kept in pins.local); Python
+# packages are hash-locked at their first install. Versions other than the pinned ones were not
+# tested with this llmserver; Open WebUI upgrades its database, which cannot go back.
+# llama.cpp release, for example b11798
+LLMSERVER_LLAMA_VERSION=$(env_val "${CFG[LLAMA_VERSION]}")
+# Ollama release, for example v0.40.7
+LLMSERVER_OLLAMA_VERSION=$(env_val "${CFG[OLLAMA_VERSION]}")
+# vLLM, Open WebUI and Open Terminal: their versions on PyPI, for example 0.32.0, 0.13.4, 0.17.20
+LLMSERVER_VLLM_VERSION=$(env_val "${CFG[VLLM_VERSION]}")
+LLMSERVER_WEBUI_VERSION=$(env_val "${CFG[WEBUI_VERSION]}")
+LLMSERVER_WEBUI_TERMINAL_VERSION=$(env_val "${CFG[WEBUI_TERMINAL_VERSION]}")
+
 ## Network and security
 # Bind address. Each model gets its own port, counting up from PORT (at most PORT_SPAN above it);
 # a model keeps the same port across restarts
@@ -890,6 +919,11 @@ LLMSERVER_WEBUI_RERANKER=$(env_val "${CFG[WEBUI_RERANKER]}")
 # on: web search through a private SearXNG on 127.0.0.1 (the questions go to public search engines) | off
 LLMSERVER_WEBUI_SEARCH=$(env_val "${CFG[WEBUI_SEARCH]}")
 LLMSERVER_WEBUI_SEARCH_PORT=$(env_val "${CFG[WEBUI_SEARCH_PORT]}")
+# Open Terminal: models in the chat run commands and edit files. on: in the sandbox (bubblewrap),
+# in its own workspace folder, shared by every account | host: without the sandbox, with your full
+# user rights | off. It listens on 127.0.0.1 only; Open WebUI passes its users' requests on.
+LLMSERVER_WEBUI_TERMINAL=$(env_val "${CFG[WEBUI_TERMINAL]}")
+LLMSERVER_WEBUI_TERMINAL_PORT=$(env_val "${CFG[WEBUI_TERMINAL_PORT]}")
 
 ## Ollama
 # host:port of an existing Ollama daemon to load models on; empty = one 'ollama serve' per model
@@ -955,16 +989,19 @@ validate_config() {
     die "LLMSERVER_SKILLSPECTOR must be auto, off or the full path of the skillspector program"
   [[ ${CFG[SKILLS_REVIEW]} =~ ^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$ ]] || die "LLMSERVER_SKILLS_REVIEW must be off or a model name as the gateway lists it ('$PROG gateway status', GET /v1/models)"
   [[ ${CFG[SANDBOX]} =~ ^(auto|on|off)$ ]] || die "LLMSERVER_SANDBOX must be auto, on or off"
-  for e in GATEWAY_PORT WEBUI_PORT WEBUI_SEARCH_PORT; do
+  for e in GATEWAY_PORT WEBUI_PORT WEBUI_SEARCH_PORT WEBUI_TERMINAL_PORT; do
     { [[ ${CFG[$e]} =~ ^[0-9]+$ ]] && ((CFG[$e] >= 1 && CFG[$e] <= 65535)); } || die "LLMSERVER_$e must be a port number (1-65535), got '${CFG[$e]}'"
   done
   ((CFG[GATEWAY_PORT] != CFG[WEBUI_PORT])) || die "LLMSERVER_GATEWAY_PORT and LLMSERVER_WEBUI_PORT must differ"
   ((CFG[WEBUI_SEARCH_PORT] != CFG[WEBUI_PORT] && CFG[WEBUI_SEARCH_PORT] != CFG[GATEWAY_PORT])) || die "LLMSERVER_WEBUI_SEARCH_PORT must differ from the gateway's and Open WebUI's ports"
+  ((CFG[WEBUI_TERMINAL_PORT] != CFG[WEBUI_PORT] && CFG[WEBUI_TERMINAL_PORT] != CFG[GATEWAY_PORT] && CFG[WEBUI_TERMINAL_PORT] != CFG[WEBUI_SEARCH_PORT])) ||
+    die "LLMSERVER_WEBUI_TERMINAL_PORT must differ from the gateway's, Open WebUI's and SearXNG's ports"
   [[ ${CFG[GATEWAY_AUTOLOAD]} =~ ^(on|off)$ ]] || die "LLMSERVER_GATEWAY_AUTOLOAD must be on or off"
   [[ ${CFG[GATEWAY_IDLE_STOP]} =~ ^[0-9]+$ ]] || die "LLMSERVER_GATEWAY_IDLE_STOP must be a number of minutes (0 = never), got '${CFG[GATEWAY_IDLE_STOP]}'"
   [[ ${CFG[WEBUI_RAG]} =~ ^(hybrid|vector)$ ]] || die "LLMSERVER_WEBUI_RAG must be hybrid or vector"
   [[ ${CFG[WEBUI_RERANKER]} =~ ^(fast|best|off)$ ]] || die "LLMSERVER_WEBUI_RERANKER must be fast, best or off"
   [[ ${CFG[WEBUI_SEARCH]} =~ ^(on|off)$ ]] || die "LLMSERVER_WEBUI_SEARCH must be on or off"
+  [[ ${CFG[WEBUI_TERMINAL]} =~ ^(on|host|off)$ ]] || die "LLMSERVER_WEBUI_TERMINAL must be on (in the sandbox), host (without it) or off"
   for e in GATEWAY_HOST WEBUI_HOST; do [[ ${CFG[$e]} =~ ^[A-Za-z0-9.:_-]+$ ]] || die "LLMSERVER_$e '${CFG[$e]}' is not a valid address"; done
   [[ ${CFG[WEBUI]} =~ ^(ask|on|off)$ ]] || die "LLMSERVER_WEBUI must be ask, on or off"
   [[ ${CFG[WEBUI_AUTH]} =~ ^(on|off)$ ]] || die "LLMSERVER_WEBUI_AUTH must be on or off"
@@ -995,6 +1032,11 @@ validate_config() {
   [[ ${CFG[TUNING]} =~ ^(on|off)$ ]] || die "LLMSERVER_TUNING must be 'on' or 'off'"
   [[ ${CFG[LLAMA_BUILD]} =~ ^(auto|cpu|vulkan|cuda-12\.8|cuda-13\.4)$ ]] || die "LLMSERVER_LLAMA_BUILD must be auto, cpu, vulkan, cuda-12.8 or cuda-13.4"
   [[ ${CFG[AUTO_INSTALL]} =~ ^(on|off)$ ]] || die "LLMSERVER_AUTO_INSTALL must be 'on' or 'off'"
+  [[ ${CFG[LLAMA_VERSION]} =~ ^(b?[0-9]{1,6})?$ ]] || die "LLMSERVER_LLAMA_VERSION must be a llama.cpp release such as b11798 (empty = the pinned one), got '${CFG[LLAMA_VERSION]}'"
+  [[ ${CFG[OLLAMA_VERSION]} =~ ^(v?[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?)?$ ]] || die "LLMSERVER_OLLAMA_VERSION must be an Ollama release such as v0.40.7 (empty = the pinned one), got '${CFG[OLLAMA_VERSION]}'"
+  for e in VLLM_VERSION WEBUI_VERSION WEBUI_TERMINAL_VERSION; do
+    [[ ${CFG[$e]} =~ ^([0-9]+(\.[0-9]+){1,3}((a|b|rc|\.post|\.dev)[0-9]+)?)?$ ]] || die "LLMSERVER_$e must be a version as PyPI lists it, such as 0.13.4 (empty = the pinned one), got '${CFG[$e]}'"
+  done
   [[ ${CFG[LOG_LEVEL]} =~ ^(info|debug)$ ]] || die "LLMSERVER_LOG_LEVEL must be 'info' or 'debug'"
   [[ ${CFG[LOG_MAX_MB]} =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "LLMSERVER_LOG_MAX_MB must be a number, got '${CFG[LOG_MAX_MB]}'"
   for e in READY_TIMEOUT STOP_TIMEOUT VRAM_RESERVE_MB DRAFT_N MAX_MODELS; do
@@ -1047,6 +1089,7 @@ declare -A PIN=(
   [garak]=0.17.1              # optional, for 'llmserver eval --garak' (installed only on request)
   [webui]=0.12.3              # optional: Open WebUI, for 'llmserver webui' (Python 3.11-3.12; installed only on request)
   [searxng]=81371861f67226091d1c4df2e3908a11d3b54eb9   # optional: SearXNG (a commit; it has no releases), for web search in Open WebUI
+  [open_terminal]=0.17.20     # optional: Open Terminal, for Open WebUI's terminal (installed with Open WebUI unless webui_terminal is off)
 )
 declare -A PIN_SHA=(  # file name -> sha256, from the projects' release files
   [uv-x86_64-unknown-linux-musl.tar.gz]=28d4385f9f9d1d1c7654d85b3855e0e2615b2f6cc13136a2edff858bbdc16ff1
@@ -1068,7 +1111,7 @@ declare -A PIN_SHA=(  # file name -> sha256, from the projects' release files
 declare -A PIN_SIZE=(  # MB, for the install plan
   [uv]=18 [python_helper]=35 [python_engine]=35 [helper]=25
   [llama:cpu]=22 [llama:vulkan]=35 [llama:cuda-12.8]=772 [llama:cuda-13.4]=600
-  [ollama:base]=1550 [ollama:rocm]=1050 [vllm:cuda]=10500 [vllm:rocm]=14000 [garak]=1700 [webui]=2500 [searxng]=150 [rerank_fast]=91 [rerank_best]=640
+  [ollama:base]=1550 [ollama:rocm]=1050 [vllm:cuda]=10500 [vllm:rocm]=14000 [garak]=1700 [webui]=2500 [searxng]=150 [open_terminal]=80 [rerank_fast]=91 [rerank_best]=640
 )
 # llmserver's own Python packages, locked with hashes (uv pip compile --generate-hashes --universal)
 read -r -d '' HELPER_LOCK <<'LOCK' || true
@@ -1216,7 +1259,8 @@ PYPI=$(setting LLMSERVER_PYPI https://pypi.org)
 VLLM_ROCM_INDEX=$(setting LLMSERVER_VLLM_ROCM_INDEX https://wheels.vllm.ai/rocm)
 FLASHINFER_INDEX=$(setting LLMSERVER_FLASHINFER_INDEX https://flashinfer.ai/whl)   # vLLM's precompiled FlashInfer kernels
 
-declare -A PINL=()   # pins.local: newer pins verified by 'upgrade --latest'
+declare -A PINL=()   # pins.local: pins from 'upgrade --latest', and digests fetched for LLMSERVER_*_VERSION
+declare -A VER_SETTING=([llama]=LLAMA_VERSION [ollama]=OLLAMA_VERSION [vllm]=VLLM_VERSION [webui]=WEBUI_VERSION [open_terminal]=WEBUI_TERMINAL_VERSION)
 pins_load() {
   local line k v
   PINL=()
@@ -1227,7 +1271,30 @@ pins_load() {
     PINL[$k]=$v
   done < "$lhome/pins.local"
 }
-pin() { if [[ -v PINL[$1] ]]; then printf '%s\n' "${PINL[$1]}"; else printf '%s\n' "${PIN[$1]-}"; fi; }
+pin() {  # name -> its version: LLMSERVER_*_VERSION > pins.local > built in
+  local s=${VER_SETTING[$1]-} v=""
+  [[ -n $s ]] && v=${CFG[$s]-}
+  if [[ -n $v ]]; then
+    case $1 in llama) v=b${v#b} ;; ollama) v=v${v#v} ;; esac
+    printf '%s\n' "$v"; return 0
+  fi
+  if [[ $1 == vllm_rocm ]]; then   # the ROCm wheel tag belongs to one vLLM version
+    v=$(pin vllm); [[ -v PINL[vllm_rocm@$v] ]] && { printf '%s\n' "${PINL[vllm_rocm@$v]}"; return 0; }
+  fi
+  if [[ -v PINL[$1] ]]; then printf '%s\n' "${PINL[$1]}"; else printf '%s\n' "${PIN[$1]-}"; fi
+}
+pin_from() {  # name -> where its version comes from
+  local s=${VER_SETTING[$1]-}
+  if [[ -n $s && -n ${CFG[$s]-} ]]; then echo "LLMSERVER_$s"; elif [[ -v PINL[$1] ]]; then echo "pins.local"; else echo "built in"; fi
+}
+pins_save() {  # KEY=VALUE... -> merged into pins.local
+  local k
+  for k in "$@"; do PINL[${k%%=*}]=${k#*=}; done
+  { printf '%s\n' "# pins and checksums verified by '$PROG upgrade --latest' or for an LLMSERVER_*_VERSION setting; delete this file to return to the built-in pins"
+    for k in "${!PINL[@]}"; do printf '%s=%s\n' "$k" "${PINL[$k]}"; done | sort
+  } > "$lhome/pins.local.tmp" && mv -f -- "$lhome/pins.local.tmp" "$lhome/pins.local"
+  pins_load
+}
 pin_sha() { if [[ -v PINL[sha:$1] ]]; then printf '%s\n' "${PINL[sha:$1]}"; else printf '%s\n' "${PIN_SHA[$1]-}"; fi; }
 
 arch_of() {  # uv | llama | ollama -> this machine's architecture name in that project's assets
@@ -1673,7 +1740,8 @@ install_targets() {  # words -> list of components (runtime first)
       all) out+=(llama ollama vllm) ;;
       runtime) ;;
       llama|llama.cpp) out+=(llama) ;; ollama) out+=(ollama) ;; vllm) out+=(vllm) ;; webui|open-webui) out+=(webui) ;; searxng|search) out+=(searxng) ;;
-      *) die "unknown component '$w': runtime, llama, ollama, vllm, all (the engines), webui or searxng" ;;
+      terminal|open-terminal) out+=(terminal) ;;
+      *) die "unknown component '$w': runtime, llama, ollama, vllm, all (the engines), webui, searxng or terminal" ;;
     esac
   done
   printf '%s\n' "${out[@]}" | awk '!seen[$0]++'
@@ -1685,7 +1753,8 @@ plan_line() {  # component -> "what, size" for the plan
     llama) v=$(llama_variant); echo "llama.cpp $(pin llama), $v build (about ${PIN_SIZE[llama:$v]:-40} MB)" ;;
     ollama) v=$(ollama_variant); local mb=${PIN_SIZE[ollama:base]}; local extra=${PIN_SIZE[ollama:rocm]}; [[ $v == rocm ]] && mb=$((mb + extra))
       echo "Ollama $(pin ollama)$([[ $v == rocm ]] && echo ' + ROCm libraries' || true) (about $mb MB)" ;;
-    webui) echo "Open WebUI $(pin webui): a web chat for people on the network, with Python $(pin python_engine) and CPU PyTorch (about $((PIN_SIZE[webui] / 1000)) GB), and its document models: embeddings and the reranker (about $((PIN_SIZE[rerank_fast] + 90)) MB)$([[ ${CFG[WEBUI_SEARCH]} == on ]] && echo "; SearXNG for web search (about ${PIN_SIZE[searxng]} MB)")" ;;
+    webui) echo "Open WebUI $(pin webui): a web chat for people on the network, with Python $(pin python_engine) and CPU PyTorch (about $((PIN_SIZE[webui] / 1000)) GB), and its document models: embeddings and the reranker (about $((PIN_SIZE[rerank_fast] + 90)) MB)$([[ ${CFG[WEBUI_SEARCH]} == on ]] && echo "; SearXNG for web search (about ${PIN_SIZE[searxng]} MB)")$([[ ${CFG[WEBUI_TERMINAL]} != off ]] && echo "; Open Terminal $(pin open_terminal) for its terminal (about ${PIN_SIZE[open_terminal]} MB)")" ;;
+    terminal) echo "Open Terminal $(pin open_terminal): a terminal and file browser in Open WebUI, where models run commands, with Python $(pin python_engine) (about ${PIN_SIZE[open_terminal]} MB)" ;;
     searxng) echo "SearXNG ${PIN[searxng]:0:12}: private web search for Open WebUI, with Python $(pin python_engine) (about ${PIN_SIZE[searxng]} MB)" ;;
     vllm) v=$(vllm_variant); if [[ $v == none ]]; then echo "vLLM: not available here (needs an NVIDIA GPU, or AMD on x86-64)"; else local gb=${PIN_SIZE[vllm:$v]}; echo "vLLM $(pin vllm) for $v, with Python $(pin python_engine) and its own PyTorch (about $((gb / 1000)) GB)"; fi ;;
   esac
@@ -1706,7 +1775,7 @@ cmd_install() {  # [component...]
   fi
   install_lock
   for c in "${targets[@]}"; do
-    case $c in runtime) install_runtime ;; llama) install_llama ;; ollama) install_ollama ;; webui) install_webui ;; searxng) install_searxng ;; vllm) [[ $(vllm_variant) == none ]] && { warn "skipping vLLM: $(plan_line vllm | sed 's/^vLLM: //')"; continue; }; install_vllm ;; esac
+    case $c in runtime) install_runtime ;; llama) pins_resolve llama; install_llama ;; ollama) pins_resolve ollama; install_ollama ;; webui) install_webui ;; searxng) install_searxng ;; terminal) install_terminal ;; vllm) [[ $(vllm_variant) == none ]] && { warn "skipping vLLM: $(plan_line vllm | sed 's/^vLLM: //')"; continue; }; pins_resolve vllm; install_vllm ;; esac
   done
   rm -rf -- "$lhome"/tmp/* 2>/dev/null || true
   info "${C_B}installed${C_0}; '$PROG versions' lists what is installed"
@@ -1723,11 +1792,62 @@ cmd_rollback() {  # component
   info "$c is back to $prev (was $cur). Running models keep their build until they are restarted ('$PROG MODEL --restart')"
   log_write info "rollback: $c $cur -> $prev"
 }
-gh_latest() {  # owner/repo -> "tag" and its assets "name sha256" (from the release's digests), via the helper
-  local py
+gh_release() {  # owner/repo [tag] -> the tag, then "name sha256" per asset (GitHub's digests); no tag = latest
+  local py url=$GH_API/repos/$1/releases/latest
+  [[ -n ${2-} ]] && url=$GH_API/repos/$1/releases/tags/$2
   py=$(helper_python) || die "the helper Python is needed; run '$PROG install runtime'"
-  curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -H 'Accept: application/vnd.github+json' "$GH_API/repos/$1/releases/latest" |
+  curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -H 'Accept: application/vnd.github+json' "$url" |
     "$py" -I -c 'import json,sys; r=json.load(sys.stdin); print(r["tag_name"]); [print(a["name"], (a.get("digest") or "").removeprefix("sha256:")) for a in r.get("assets", [])]' 2>/dev/null
+}
+# A version from LLMSERVER_*_VERSION that is not the pin needs facts the script does not carry: the
+# SHA-256 digests GitHub publishes for the llama.cpp and Ollama release files, and the ROCm wheel tag
+# for vLLM. They are fetched once and kept in pins.local; with no digest, there is no download.
+pins_resolve() {  # component
+  local c=$1 s=${VER_SETTING[$1]-} v f a var out name sha files=() lines=() missing=()
+  [[ -n $s && -n ${CFG[$s]} ]] || return 0
+  [[ -n $OFFLINE_SRC ]] && return 0   # from a bundle: its pins.local has them
+  v=$(pin "$c")
+  case $c in
+    llama)
+      var=$(llama_variant); f=$(llama_asset "$var") || return 0
+      files=("$f"); [[ $var == cuda-* ]] && files+=("cudart-$f")
+      for f in "${files[@]}"; do [[ -n $(pin_sha "$f") ]] || missing+=("$f"); done
+      ((${#missing[@]})) || return 0
+      install_runtime
+      info "fetching the SHA-256 digests of llama.cpp $v from GitHub (LLMSERVER_LLAMA_VERSION)"
+      out=$(gh_release ggml-org/llama.cpp "$v") && [[ -n $out ]] || die "llama.cpp has no release '$v' on GitHub (LLMSERVER_LLAMA_VERSION; releases are named like b11798)"
+      while read -r name sha; do
+        [[ ($name == *linux* || $name == *ubuntu*) && $sha =~ ^[0-9a-f]{64}$ ]] && lines+=("sha:$name=$sha")
+      done <<<"$(tail -n +2 <<<"$out")" ;;
+    ollama)
+      var=$(ollama_variant); a=$(arch_of ollama) || return 0
+      files=("ollama-linux-$a.tar.zst"); [[ $var == rocm ]] && files+=("ollama-linux-$a-rocm.tar.zst")
+      for f in "${files[@]}"; do [[ -n $(pin_sha "$f@$v") ]] || missing+=("$f"); done
+      ((${#missing[@]})) || return 0
+      install_runtime
+      info "fetching the SHA-256 digests of Ollama $v from GitHub (LLMSERVER_OLLAMA_VERSION)"
+      out=$(gh_release ollama/ollama "$v") && [[ -n $out ]] || die "Ollama has no release '$v' on GitHub (LLMSERVER_OLLAMA_VERSION; releases are named like v0.40.7)"
+      while read -r name sha; do
+        [[ $name == *linux* && $sha =~ ^[0-9a-f]{64}$ ]] && lines+=("sha:$name@$v=$sha")
+      done <<<"$(tail -n +2 <<<"$out")" ;;
+    vllm)
+      [[ $(vllm_variant) == rocm && ! -v PINL[vllm_rocm@$v] ]] || return 0
+      if [[ $v == "${PIN[vllm]}" ]]; then lines+=("vllm_rocm@$v=${PIN[vllm_rocm]}")
+      else
+        sha=$(curl -fsSL --proto '=https' --max-time 60 "$VLLM_ROCM_INDEX/$v/" | grep -oE 'rocm[0-9]+' | sort -V | tail -n 1) || true
+        [[ -n $sha ]] || die "vLLM $v has no ROCm wheels at $VLLM_ROCM_INDEX (LLMSERVER_VLLM_VERSION)"
+        lines+=("vllm_rocm@$v=$sha")
+      fi ;;
+    *) return 0 ;;
+  esac
+  ((${#lines[@]})) && pins_save "${lines[@]}"
+  if [[ $c != vllm ]]; then
+    for f in "${missing[@]}"; do
+      [[ -n $(pin_sha "$([[ $c == ollama ]] && echo "$f@$v" || echo "$f")") ]] ||
+        die "the $c release $v publishes no SHA-256 digest for $f, so it cannot be verified; choose another release or '$PROG config unset ${s,,}'"
+    done
+  fi
+  log_write info "pins for $s=$v: ${lines[*]}"
 }
 cmd_upgrade() {  # [component] [--latest]
   local c=${1:-all} out tag name sha ok lines=() comps=() k
@@ -1736,17 +1856,24 @@ cmd_upgrade() {  # [component] [--latest]
     all) comps=(runtime)   # what is installed now; 'upgrade' never installs a new component
       for k in llama ollama vllm; do [[ $(engine_source "$k") == managed ]] && comp_meta "$k" && comps+=("$k"); done
       compgen -G "$lhome/tools/open-webui/*/bin/open-webui" >/dev/null && comps+=(webui)
-      compgen -G "$lhome/tools/searxng/*/venv" >/dev/null && comps+=(searxng) ;;
-    llama.cpp) comps=(llama) ;; runtime|llama|ollama|vllm|webui|searxng) comps=("$c") ;; *) die "unknown component '$c': runtime, llama, ollama, vllm, webui or searxng" ;;
+      compgen -G "$lhome/tools/searxng/*/venv" >/dev/null && comps+=(searxng)
+      compgen -G "$lhome/tools/open-terminal/*/bin/open-terminal" >/dev/null && comps+=(terminal) ;;
+    llama.cpp) comps=(llama) ;; open-terminal) comps=(terminal) ;; runtime|llama|ollama|vllm|webui|searxng|terminal) comps=("$c") ;;
+    *) die "unknown component '$c': runtime, llama, ollama, vllm, webui, searxng or terminal" ;;
   esac
   if ((opt_latest)); then
     install_runtime
     lhome_init
     for c in "${comps[@]}"; do
+      k=${VER_SETTING[$([[ $c == terminal ]] && echo open_terminal || echo "$c")]-}
+      if [[ -n $k && -n ${CFG[$k]} ]]; then
+        info "$c: LLMSERVER_$k=${CFG[$k]} is set and wins over --latest; '$PROG config unset ${k,,}' to follow the latest release"
+        continue
+      fi
       case $c in
         llama|ollama|runtime)
           local repo; case $c in llama) repo=ggml-org/llama.cpp ;; ollama) repo=ollama/ollama ;; *) repo=astral-sh/uv ;; esac
-          out=$(gh_latest "$repo") || die "could not ask GitHub for the latest $repo release"
+          out=$(gh_release "$repo") || die "could not ask GitHub for the latest $repo release"
           tag=${out%%$'\n'*}; ok=0
           while read -r name sha; do
             [[ ($name == *linux* || $name == *ubuntu*) && $sha =~ ^[0-9a-f]{64}$ ]] || continue
@@ -1754,7 +1881,14 @@ cmd_upgrade() {  # [component] [--latest]
           done <<<"$(tail -n +2 <<<"$out")"
           ((ok)) || die "the latest $repo release ($tag) publishes no SHA-256 digests for its Linux files, so it cannot be verified; staying on $(pin "$([[ $c == runtime ]] && echo uv || echo "$c")")"
           lines+=("$([[ $c == runtime ]] && echo uv || echo "$c")=$tag") ;;
-        webui|searxng) info "$c stays at the version this llmserver pins ($( [[ $c == webui ]] && pin webui || echo "${PIN[searxng]:0:12}")); a new llmserver release brings a new pin" ;;
+        webui|terminal)
+          local py pkg pn; py=$(helper_python)
+          case $c in webui) pkg=open-webui pn=webui ;; *) pkg=open-terminal pn=open_terminal ;; esac
+          tag=$(curl -fsSL --proto '=https' --max-time 60 "$PYPI/pypi/$pkg/json" | "$py" -I -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])') || die "could not ask PyPI for the latest $pkg"
+          [[ $tag =~ ^[0-9][0-9A-Za-z.]*$ ]] || die "PyPI gave an unexpected version for $pkg: '$tag'"
+          [[ $tag != "${PIN[$pn]}" ]] && warn "$pkg $tag is newer than the version this llmserver was tested with (${PIN[$pn]}); check its settings after the start$([[ $c == webui ]] && echo "; its database is upgraded and cannot go back, so '$PROG backup' first")"
+          lines+=("$pn=$tag") ;;
+        searxng) info "searxng stays at the commit this llmserver pins (${PIN[searxng]:0:12}); a new llmserver release brings a new pin" ;;
         vllm)
           local py; py=$(helper_python)
           tag=$(curl -fsSL --proto '=https' --max-time 60 "$PYPI/pypi/vllm/json" | "$py" -I -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])') || die "could not ask PyPI for the latest vLLM"
@@ -1766,19 +1900,15 @@ cmd_upgrade() {  # [component] [--latest]
           fi ;;
       esac
     done
-    for k in "${lines[@]}"; do PINL[${k%%=*}]=${k#*=}; done
-    { printf '%s\n' "# newer pins, verified by '$PROG upgrade --latest' on $(date +%F); delete this file to return to the built-in pins"
-      for k in "${!PINL[@]}"; do printf '%s=%s\n' "$k" "${PINL[$k]}"; done | sort
-    } > "$lhome/pins.local.tmp" && mv -f -- "$lhome/pins.local.tmp" "$lhome/pins.local"
+    ((${#lines[@]})) && pins_save "${lines[@]}"
     log_write info "upgrade --latest pinned: ${lines[*]}"
-    pins_load
   fi
   yes=1 cmd_install "${comps[@]}"
   [[ " ${comps[*]} " == *" runtime "* ]] && skills_refresh   # the hf-cli skill follows the pinned hf
   return 0
 }
 cmd_versions() {  # [--json]
-  local c src items=() v
+  local c src items=() v k
   engine_paths
   for c in runtime llama ollama vllm; do
     src=managed; [[ $c != runtime ]] && src=$(engine_source "$c")
@@ -1806,8 +1936,13 @@ cmd_versions() {  # [--json]
     if ((json)); then items+=("$(jo component '"searxng"' source '"managed"' version "$(js "${PIN[searxng]:0:12}")" path "$(js "$(searxng_dir)")")")
     else printf '%-8s %-8s %-12s %-10s %s\n' searxng managed "${PIN[searxng]:0:12}" cpu "(web search for Open WebUI)"; fi
   fi
+  if terminal_installed; then
+    if ((json)); then items+=("$(jo component '"terminal"' source '"managed"' version "$(js "$(pin open_terminal)")" path "$(js "$(terminal_dir)")")")
+    else printf '%-8s %-8s %-12s %-10s %s\n' terminal managed "$(pin open_terminal)" cpu "(Open Terminal for Open WebUI)"; fi
+  fi
   if ((json)); then jo version "$(js "$VERSION")" home "$(js "$lhome")" uv "$(js "$(pin uv)")" components "$(ja "${items[@]}")"; echo
-  else echo "Home: $lhome  (uv $(pin uv)$([[ -r $lhome/pins.local ]] && echo '; newer pins from upgrade --latest in pins.local' || true))"; fi
+  else echo "Home: $lhome  (uv $(pin uv)$([[ -r $lhome/pins.local ]] && echo '; newer pins in pins.local' || true))"
+    for k in "${!VER_SETTING[@]}"; do [[ -n ${CFG[${VER_SETTING[$k]}]} ]] && echo "Version setting: LLMSERVER_${VER_SETTING[$k]}=${CFG[${VER_SETTING[$k]}]}"; done; true; fi
 }
 
 # ---- engines -----------------------------------------------------------------
@@ -5091,7 +5226,6 @@ advise() {  # MODE: total (the machine) | now (free now) | place (the best GPUs 
         else F_MSG="$what; this machine has $(gb "$F_CAP") of usable VRAM and $(gb "$RAM_AVAIL") of free RAM, so it will not run"; fi ;;
     unknown) F_MSG="memory check skipped for $m: ${F_MSG}" ;;
   esac
-  # suggestions
   if [[ $F_RATING != good && $F_RATING != unknown && $quiet != 2 ]]; then
     if [[ $e != vllm && $F_CTXFIT -ge 4096 && $F_CTXFIT -lt $F_CTX ]]; then F_SUGG+=("--ctx $F_CTXFIT fits entirely on the GPU"); fi
     if [[ ($e == llama || $m == hf.co/*) && $F_RATING != good ]]; then
@@ -6504,6 +6638,7 @@ ps_services() {  # the gateway and Open WebUI, when they run
   svc_alive gateway && out+=("gateway     $(gateway_url)  (pid ${ST[PID]}): one address for every running model")
   svc_alive webui && out+=("Open WebUI  $(webui_urls "${ST[HOST]}" | head -n 1)  (pid ${ST[PID]})$([[ ${ST[FIRST]:-0} == 1 ]] && echo ': this computer only, until the admin account exists')")
   svc_alive searxng && out+=("SearXNG     http://127.0.0.1:${ST[PORT]}  (pid ${ST[PID]}): web search for Open WebUI")
+  svc_alive terminal && out+=("Terminal    http://127.0.0.1:${ST[PORT]}  (pid ${ST[PID]}): Open Terminal for Open WebUI$([[ ${ST[MODE]-} == host ]] && echo ', WITHOUT the sandbox' || echo ', in the sandbox')")
   ((${#out[@]})) || return 0
   echo; echo "Services:"; printf '  %s\n' "${out[@]}"
 }
@@ -6765,7 +6900,8 @@ setup_webui() {  # setup: offer Open WebUI (once, with WEBUI=ask)
       cfg_write LLMSERVER_WEBUI_HOST "${CFG[WEBUI_HOST]}" 0
       printf 'Also web search in the chat, through a private SearXNG (about %d MB)? The questions people search for go to public search engines (Google, Bing, DuckDuckGo and others), from this computer [y/N]: ' "${PIN_SIZE[searxng]}" >&2
       IFS= read -r reply || reply=""
-      if [[ ${reply,,} == y* ]]; then CFG[WEBUI_SEARCH]=on; cfg_write LLMSERVER_WEBUI_SEARCH on 0; fi ;;
+      if [[ ${reply,,} == y* ]]; then CFG[WEBUI_SEARCH]=on; cfg_write LLMSERVER_WEBUI_SEARCH on 0; fi
+      [[ ${CFG[WEBUI_TERMINAL]} == off ]] || info "Open WebUI comes with a terminal (Open Terminal) where models run commands and edit files, for every account, in the sandbox in its own workspace; '$PROG config set webui_terminal off' removes it" ;;
   esac
   ( yes=1 webui_start ) || warn "Open WebUI did not start; '$PROG webui' tries again"
 }
@@ -7052,6 +7188,7 @@ MODEL is a menu number or \`llama:ORG/REPO-GGUF:QUANT\`, \`vllm:ORG/REPO\`, \`ol
 - One address for every running model: \`llmserver gateway start\`, then \`http://127.0.0.1:8000/v1\` (the model is chosen by its name, as \`/v1/models\` lists it).
 - A web chat for people: \`llmserver webui\` (installs about 2.5 GB on first use; ask the user first). Documents use hybrid search and a reranker; \`llmserver config set webui_reranker best\` uses bge-reranker-v2-m3 on llama.cpp (a GPU model). The first start asks the person for the admin account in their terminal; an agent cannot answer it, so tell the person to run \`llmserver webui admin\` themselves.
 - Web search in that chat: \`llmserver config set webui_search on\`, then \`llmserver webui restart\`. The questions then go to public search engines: ask the user first.
+- That chat has a terminal (Open Terminal) by default: models run commands and edit files in a shared workspace, in the sandbox. \`llmserver config set webui_terminal off\` removes it. Never set \`webui_terminal host\` (no sandbox: the user's full rights) unless the user asks for it.
 - Menu: \`llmserver model add MODEL\` (checks that the name exists), \`llmserver model rm N\`.
 - Settings: \`llmserver config set NAME VALUE\` (checked before it is saved), \`llmserver config unset NAME\`.
 - Exit status 3 means the security checks refused a model; 4 means they need an answer or an approval. Show the findings to the user. Do not add \`--yes\`, \`--accept-risk\` or \`--remote-code\`, and do not run \`llmserver trust approve\`, unless the user decides to.
@@ -7073,7 +7210,7 @@ EOF3
 # pinned checksums and hash locks as online.
 readonly SIG_NAMESPACE=llmserver-bundle
 export_engines() {  # dir -> the files an offline install needs, for this machine's engines
-  local d=$1 a f ver var url tag comps=() vars=() py lock klock
+  local d=$1 a f ver var url tag comps=() vars=() py lock klock k
   mkdir -p "$d/files" "$d/python" "$d/wheels" "$d/locks"
   ver=$(pin uv); a=$(arch_of uv) || die "no uv build for $(uname -m)"
   f=uv-$a-unknown-linux-musl.tar.gz
@@ -7113,6 +7250,10 @@ export_engines() {  # dir -> the files an offline install needs, for this machin
     comps+=(vllm); vars+=("vllm=$var")
   fi
   [[ -s $lhome/pins.local ]] && cp -- "$lhome/pins.local" "$d/pins.local"
+  for k in "${!VER_SETTING[@]}"; do   # the other machine may not have the version settings
+    [[ -n ${CFG[${VER_SETTING[$k]}]} ]] || continue
+    sed -i "/^$k=/d" "$d/pins.local" 2>/dev/null || true; printf '%s=%s\n' "$k" "$(pin "$k")" >> "$d/pins.local"
+  done
   printf '{"components": %s, "variants": %s, "arch": "%s"}\n' "$(jsa "${comps[@]}")" "$(jsa "${vars[@]}")" "$(uname -m)" > "$d/engines.json"
   EXPORT_COMPS=("${comps[@]}")
 }
@@ -7181,7 +7322,6 @@ bundle_open() {  # bundle -> BUNDLE_DIR, a checked copy of its contents; exits 3
   grep -qx SHA256SUMS <<<"$members" || { rm -rf -- "$st"; trust_exit 3 "$f is not an llmserver bundle (no SHA256SUMS)"; }
   tar -xf "$f" -C "$st" --no-same-owner --no-same-permissions SHA256SUMS
   grep -qx SHA256SUMS.sig <<<"$members" && { tar -xf "$f" -C "$st" --no-same-owner --no-same-permissions SHA256SUMS.sig; sig=1; }
-  # the signature first
   if [[ -n ${CFG[TRUST_SIGNERS]} ]]; then
     ((sig)) || { rm -rf -- "$st"; trust_exit 3 "$f is not signed, and LLMSERVER_TRUST_SIGNERS requires a signature"; }
     have ssh-keygen || { rm -rf -- "$st"; trust_exit 3 "checking the signature needs ssh-keygen (OpenSSH)"; }
@@ -8839,6 +8979,7 @@ run_uninstall() {
   # 2. the services, then the models llmserver started (servers it did not start are left running)
   svc_alive webui && svc_stop webui "Open WebUI"
   svc_alive searxng && svc_stop searxng SearXNG
+  svc_alive terminal && svc_stop terminal "Open Terminal"
   svc_alive gateway && svc_stop gateway
   for f in "${R_FILES[@]}"; do
     stop_rec "$f" || u_fail "${ST[SPEC]:-a model} (pid ${ST[PID]:-?}) could not be stopped"
@@ -9575,6 +9716,7 @@ install_webui() {
   py=$(pin python_engine) d=$(webui_dir)
   install_runtime
   if ! webui_installed; then
+    [[ $(pin webui) != "${PIN[webui]}" ]] && warn "Open WebUI $(pin webui) (from $(pin_from webui)) is not the version this llmserver was tested with (${PIN[webui]}): check its settings after the start. It upgrades its database at the first start, which cannot go back; '$PROG backup' keeps a copy"
     info "installing Open WebUI $(pin webui) with its packages (hash-locked, CPU PyTorch); this takes a few minutes"
     uvc python install "$py" --no-bin >/dev/null 2>&1 || uvc python install "$py" --no-bin || die "uv could not install Python $py"
     lock=$lhome/locks/open-webui-$(pin webui)-cpu.txt
@@ -9596,6 +9738,7 @@ install_webui() {
   mkdir -p "$webui_home"/{data,home}; chmod 700 "$webui_home"
   webui_models
   [[ ${CFG[WEBUI_SEARCH]} == on ]] && install_searxng
+  [[ ${CFG[WEBUI_TERMINAL]} != off ]] && install_terminal
   return 0
 }
 # ---- SearXNG ----
@@ -9710,6 +9853,88 @@ searxng_start() {  # start SearXNG on 127.0.0.1 unless it runs; status 1 if it c
   rec_write "$(svc_file searxng)" "ENGINE=service" "PID=$SVC_PID" "STARTTIME=$(pid_starttime "$SVC_PID")" "HOST=127.0.0.1" "PORT=$p" "LOG=$logs_dir/searxng.log" "STARTED=$(date +%s)" "VERSION=${PIN[searxng]:0:12}"
   info "SearXNG ready on 127.0.0.1:$p (web search for Open WebUI$( ((${#sb[@]})) && echo ', in the sandbox'))"
 }
+# ---- Open Terminal ----
+# A terminal and a file browser in Open WebUI: models run commands and edit files, and people see the
+# files beside the chat. Open Terminal (open-webui/open-terminal, MIT) is a FastAPI server; Open WebUI
+# keeps its address and key and passes each user's requests on, so it listens on 127.0.0.1 only.
+# With webui_terminal on it runs in the sandbox: the system read-only, an empty home and llmserver's
+# folder hidden, except its own workspace folder (its home, shared by every account), which it keeps.
+terminal_dir() { printf '%s\n' "$lhome/tools/open-terminal/$(pin open_terminal)"; }
+terminal_home=$webui_home/terminal   # its workspace: the home folder of the terminal, kept between starts
+terminal_installed() { [[ -x $(terminal_dir)/bin/open-terminal ]]; }
+install_terminal() {
+  local d st py lock
+  py=$(pin python_engine) d=$(terminal_dir)
+  terminal_installed && return 0
+  install_runtime
+  info "installing Open Terminal $(pin open_terminal) with its packages (hash-locked)"
+  uvc python install "$py" --no-bin >/dev/null 2>&1 || uvc python install "$py" --no-bin || die "uv could not install Python $py"
+  lock=$lhome/locks/open-terminal-$(pin open_terminal).txt
+  if [[ ! -s $lock ]]; then
+    printf 'open-terminal==%s\n' "$(pin open_terminal)" > "$lhome/tmp/terminal.in"
+    uvc pip compile "$lhome/tmp/terminal.in" --python-version "${py%.*}" --generate-hashes --emit-index-url \
+      --no-header --quiet -o "$lock.tmp" || { rm -f -- "$lock.tmp"; die "could not resolve Open Terminal $(pin open_terminal)"; }
+    mv -f -- "$lock.tmp" "$lock"; rm -f -- "$lhome/tmp/terminal.in"
+  fi
+  st=$(stage_dir open-terminal)
+  uvc venv --relocatable --python "$py" --no-project --quiet "$st/venv" || die "could not create Open Terminal's venv"
+  uvc pip sync --quiet --require-hashes --python "$st/venv/bin/python" "$lock" || { rm -rf -- "$st"; die "could not install Open Terminal (hash-checked against $lock)"; }
+  "$st/venv/bin/python" -I -m open_terminal --help >/dev/null 2>&1 || { rm -rf -- "$st"; die "the installed Open Terminal does not run"; }
+  mkdir -p "${d%/*}"; chmod -R go-w -- "$st/venv"
+  rm -rf -- "$d"; mv -- "$st/venv" "$d"; rm -rf -- "$st"
+  log_write info "installed Open Terminal $(pin open_terminal) into $d"
+  tool_prune "${d%/*}" "${d##*/}" terminal
+}
+terminal_key_file=$config_dir/terminal-key
+terminal_key() {  # the key Open WebUI sends to Open Terminal (made once, private)
+  if [[ ! -s $terminal_key_file ]]; then mkdir -p "$config_dir"; (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$terminal_key_file"); fi
+  cat -- "$terminal_key_file"
+}
+terminal_url() { printf 'http://127.0.0.1:%s\n' "$1"; }
+terminal_start() {  # start Open Terminal on 127.0.0.1 unless it runs; status 1 if it cannot (Open WebUI then has no terminal)
+  local d p=${CFG[WEBUI_TERMINAL_PORT]} mode=${CFG[WEBUI_TERMINAL]} envs=() sb=() ws=$terminal_home/home origins
+  if svc_alive terminal; then
+    [[ ${ST[MODE]-} == "$mode" && ${ST[PORT]-} == "$p" ]] && return 0
+    svc_stop terminal "Open Terminal"   # started with other settings
+  fi
+  if [[ $mode == on ]] && ! { [[ ${CFG[SANDBOX]} != off ]] && sandbox_works; }; then
+    warn "Open Terminal runs only in the sandbox (webui_terminal on), and $( [[ ${CFG[SANDBOX]} == off ]] && echo 'the sandbox is off (LLMSERVER_SANDBOX=off)' || echo "bubblewrap does not work here ($(have bwrap && echo 'user namespaces are not allowed' || echo 'install bubblewrap'))"), so Open WebUI has no terminal."
+    warn "  'config set webui_terminal host' runs it without the sandbox: models in the chat then act with your full user rights"
+    return 1
+  fi
+  terminal_installed || { install_lock; install_terminal; }
+  d=$(terminal_dir)
+  port_in_use "$p" && { warn "port $p (LLMSERVER_WEBUI_TERMINAL_PORT) is in use, so Open WebUI has no terminal; choose another: '$PROG config set webui_terminal_port N'"; return 1; }
+  mkdir -p "$ws"; chmod 700 "$terminal_home"
+  terminal_key >/dev/null
+  origins=$(webui_urls | sed 's#/$##' | paste -sd, -)   # Open WebUI calls it from its server; browsers never need it
+  # PATH: the system's programs and what is installed into the workspace, never Open Terminal's own venv;
+  # its settings come from here only (--isolated: no config.toml, which a command could write)
+  envs=("PATH=$ws/.local/bin:/usr/local/bin:/usr/bin:/bin" "HOME=$ws" "LANG=C.UTF-8" "TERM=xterm-256color" "SHELL=/bin/bash"
+    "OPEN_TERMINAL_API_KEY_FILE=$terminal_key_file" "OPEN_TERMINAL_CORS_ALLOWED_ORIGINS=$origins"
+    "OPEN_TERMINAL_MULTI_USER=false" "OPEN_TERMINAL_ENABLE_DESKTOP=false" "OPEN_TERMINAL_FILE_BROWSER_ROOT=home")
+  mapfile -t -O "${#envs[@]}" envs < <(proxy_env)   # commands may use the network (pip, git); never this computer through a proxy
+  if [[ $mode == on ]]; then
+    sandbox_base --dev /dev
+    sb=("${SB_BASE[@]}" --ro-bind "$d" "$d" --ro-bind-try "$lhome/python" "$lhome/python" --ro-bind "$terminal_key_file" "$terminal_key_file"
+      --bind "$ws" "$ws" --chdir "$ws")
+    mapfile -t -O "${#sb[@]}" sb < <(ca_binds); sb+=(--)
+  fi
+  svc_launch terminal "$logs_dir/terminal.log" "${envs[@]}" -- "${sb[@]}" "$d/bin/python" -I -m open_terminal run --isolated --host 127.0.0.1 --port "$p" --cwd "$ws"
+  local rc=0; svc_wait "Open Terminal" "$(terminal_url "$p")/health" 120 || rc=$?
+  if ((rc)); then ((rc == 2)) && stop_pid "$SVC_PID" 1; warn "Open Terminal did not start, so Open WebUI has no terminal; see $logs_dir/terminal.log"; return 1; fi
+  rec_write "$(svc_file terminal)" "ENGINE=service" "PID=$SVC_PID" "STARTTIME=$(pid_starttime "$SVC_PID")" "HOST=127.0.0.1" "PORT=$p" "LOG=$logs_dir/terminal.log" "STARTED=$(date +%s)" \
+    "VERSION=$(pin open_terminal)" "MODE=$mode"
+  if [[ $mode == on ]]; then info "Open Terminal ready on 127.0.0.1:$p, in the sandbox (workspace: $ws)"
+  else warn "Open Terminal ready on 127.0.0.1:$p WITHOUT the sandbox (webui_terminal host): models in the chat act with your full user rights"; fi
+}
+terminal_line() {  # mode -> the terminal, in words
+  case $1 in
+    on) echo "Open Terminal for every account, in the sandbox (workspace $terminal_home/home; 'config set webui_terminal off' turns it off)" ;;
+    host) echo "Open Terminal for every account, WITHOUT the sandbox: models act with your full user rights (webui_terminal host)" ;;
+    *) echo "off ('$PROG config set webui_terminal on' turns it on)" ;;
+  esac
+}
 # ---- the best reranker: bge-reranker-v2-m3 on llama.cpp ----
 rerank_best_running() {  # is it running and ready? (ST holds its record)
   local f
@@ -9735,11 +9960,13 @@ rerank_best_start() {  # start it unless it runs (RB_STARTED=1 when this did); s
 # into the database before a start, but only those whose llmserver setting changed since llmserver
 # last wrote them: a change the admin made stays until the llmserver setting changes.
 webui_gw_key() { if [[ ${CFG[AUTH]} == key && -s $key_file ]]; then cat -- "$key_file"; else echo none; fi; }   # what Open WebUI sends to the gateway
-webui_rag_settings() {  # reranker (fast|best|off) -> RAG_KV: "ENV_NAME db.key json-value" (ENV_NAME - : database only)
-  local rr=$1 hybrid=false k=6 model="" engine="" url="" search=false gk; gk=$(webui_gw_key)
+webui_rag_settings() {  # reranker (fast|best|off) [terminal on|host|off] -> RAG_KV: "ENV_NAME db.key json-value" (ENV_NAME - : database only)
+  local rr=$1 term=${2:-off} hybrid=false k=6 model="" engine="" url="" search=false gk terms='[]'; gk=$(webui_gw_key)
   [[ ${CFG[WEBUI_RAG]} == hybrid ]] && hybrid=true k=20   # hybrid: 20 candidates from each search; the reranker keeps the best 6
   case $rr in fast) model=$RERANK_REPO ;; best) engine=external model=${RERANK_BEST_SPEC#llama:} url=$(gateway_url)/rerank ;; esac
   [[ ${CFG[WEBUI_SEARCH]} == on ]] && search=true
+  # llmserver's terminal connection (id llmserver), open to every account; others the admin adds stay
+  [[ $term != off ]] && terms='[{"id":"llmserver","name":"Open Terminal (llmserver)","enabled":true,"url":"'$(terminal_url "${CFG[WEBUI_TERMINAL_PORT]}")'","path":"/openapi.json","key":"'$(terminal_key)'","auth_type":"bearer","config":{"access_grants":[{"principal_type":"user","principal_id":"*","permission":"read"}]}}]'
   RAG_KV=(
     "ENABLE_RAG_HYBRID_SEARCH rag.enable_hybrid_search $hybrid"
     "RAG_HYBRID_BM25_WEIGHT rag.hybrid_bm25_weight 0.5"
@@ -9754,15 +9981,17 @@ webui_rag_settings() {  # reranker (fast|best|off) -> RAG_KV: "ENV_NAME db.key j
     "WEB_SEARCH_ENGINE web.search.engine \"searxng\""
     "SEARXNG_QUERY_URL web.search.searxng_query_url \"http://127.0.0.1:${CFG[WEBUI_SEARCH_PORT]}/search?q=<query>\""
     "WEB_SEARCH_RESULT_COUNT web.search.result_count 5"
+    "TERMINAL_SERVER_CONNECTIONS terminal_server.connections $terms"
   )
 }
 webui_apply() {  # write the changed RAG_KV values into Open WebUI's database (it is not running) -> the keys written
   local py e want="" ev dk jv
   py=$(helper_python) || return 0
   for e in "${RAG_KV[@]}"; do read -r ev dk jv <<<"$e"; want+="${want:+,}\"$dk\":$jv"; done
-  py_env "$py" -I - "$webui_home/data/webui.db" "$webui_home/llmserver-applied.json" "{$want}" <<'PY'
+  # the values hold keys: through the environment, not the command line (other users can read that)
+  LLMSERVER_WANT="{$want}" py_env "$py" -I - "$webui_home/data/webui.db" "$webui_home/llmserver-applied.json" <<'PY'
 import json, os, sqlite3, sys, time
-db, applied_path, want = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+db, applied_path, want = sys.argv[1], sys.argv[2], json.loads(os.environ['LLMSERVER_WANT'])
 try: applied = json.load(open(applied_path))
 except (OSError, ValueError): applied = {}
 changed = []
@@ -9779,6 +10008,8 @@ if os.path.exists(db):
         for k, v in want.items():
             if k == 'openai.api_keys' and isinstance(cur.get(k), list) and cur[k]:
                 v = v[:1] + cur[k][1:]   # only the first connection (the gateway) is llmserver's
+            if k == 'terminal_server.connections':   # only the connection with id llmserver is llmserver's
+                v = [t for t in (cur.get(k) if isinstance(cur.get(k), list) else []) if not (isinstance(t, dict) and t.get('id') == 'llmserver')] + v
             if applied.get(k, object()) == want[k] or cur.get(k, object()) == v: continue
             c.execute('insert into config (key, value, updated_at) values (?, ?, ?) on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at',
                       (k, json.dumps(v), int(time.time())))
@@ -9856,7 +10087,7 @@ print("llmserver-admin:" + asyncio.run(main()))' 2>&1 | sed -u 's/^/[admin accou
   esac
 }
 webui_start() {
-  local d h=${CFG[WEBUI_HOST]} p=${CFG[WEBUI_PORT]} envs=() sb=() auth=True u n acc rr=${CFG[WEBUI_RERANKER]} search=off e ev dk jv changed first=0 run=() sc
+  local d h=${CFG[WEBUI_HOST]} p=${CFG[WEBUI_PORT]} envs=() sb=() auth=True u n acc rr=${CFG[WEBUI_RERANKER]} search=off term=off e ev dk jv changed first=0 run=() sc
   if svc_alive webui; then info "Open WebUI is running: $(webui_urls "${ST[HOST]}" | head -n 1)"; return 0; fi
   if ! webui_installed; then
     if ((!yes)); then
@@ -9879,8 +10110,9 @@ webui_start() {
   RB_STARTED=0
   [[ $rr == best ]] && { rerank_best_start || rr=fast; }
   if [[ ${CFG[WEBUI_SEARCH]} == on ]]; then searxng_start && search=on; fi
+  if [[ ${CFG[WEBUI_TERMINAL]} != off ]]; then terminal_start && term=${CFG[WEBUI_TERMINAL]}; fi
   local save=${CFG[WEBUI_SEARCH]}; CFG[WEBUI_SEARCH]=$search
-  webui_rag_settings "$rr"; CFG[WEBUI_SEARCH]=$save
+  webui_rag_settings "$rr" "$term"; CFG[WEBUI_SEARCH]=$save
   changed=$(webui_apply) || changed=""
   [[ -n $changed ]] && info "updated in Open WebUI's settings (from llmserver's): $changed"
   [[ ${CFG[WEBUI_AUTH]} == off ]] && auth=False
@@ -9922,7 +10154,7 @@ webui_start() {
     2) stop_pid "$SVC_PID" 1 || true; die "Open WebUI did not start within ${CFG[READY_TIMEOUT]}s; see $logs_dir/webui.log" ;;
   esac
   rec_write "$(svc_file webui)" "ENGINE=service" "PID=$SVC_PID" "STARTTIME=$(pid_starttime "$SVC_PID")" "HOST=$h" "PORT=$p" "LOG=$logs_dir/webui.log" "STARTED=$(date +%s)" "VERSION=$(pin webui)" \
-    "RAG=${CFG[WEBUI_RAG]}" "RERANKER=$rr" "SEARCH=$search" "RERANK_STARTED=$RB_STARTED" "GATEWAY_STARTED=$GW_STARTED" "FIRST=$first"
+    "RAG=${CFG[WEBUI_RAG]}" "RERANKER=$rr" "SEARCH=$search" "TERMINAL=$term" "RERANK_STARTED=$RB_STARTED" "GATEWAY_STARTED=$GW_STARTED" "FIRST=$first"
   info "${C_B}Open WebUI ready${C_0}: $(webui_urls "$h" | head -n 1)$( [[ $h == 0.0.0.0 ]] && echo " (people on your network use this address; here also $(webui_urls "$h" | tail -n 1))")"
   if ((first)); then
     info "  ${C_B}first start${C_0}: Open WebUI listens on this computer only until its admin account exists, so nobody on the network can take that account."
@@ -9936,6 +10168,9 @@ webui_start() {
   fi
   info "  it chats with every running model through the gateway ($(gateway_url)); start models with '$PROG MODEL'"
   info "  documents: $(webui_rag_line "${CFG[WEBUI_RAG]}" "$rr"); web search: $(webui_search_line "$search")"
+  info "  terminal: $(terminal_line "$term")"
+  [[ $term != off ]] && info "  in a chat, choose it with the terminal button; the model must support tool calling"
+  return 0
 }
 webui_rag_line() {  # rag reranker -> how documents are searched, in words
   if [[ $1 == vector ]]; then echo "vector search (WEBUI_RAG=vector)"; return 0; fi
@@ -9946,11 +10181,12 @@ webui_rag_line() {  # rag reranker -> how documents are searched, in words
   esac
 }
 webui_search_line() { if [[ $1 == on ]]; then echo "on, through SearXNG on 127.0.0.1:${CFG[WEBUI_SEARCH_PORT]} (each chat turns it on with its Web Search button)"; else echo "off ('$PROG config set webui_search on' turns it on)"; fi; }
-webui_stop() {  # stops Open WebUI and what it started (SearXNG, the best reranker, the gateway); a gateway you started stays
+webui_stop() {  # stops Open WebUI and what it started (SearXNG, Open Terminal, the best reranker, the gateway); a gateway you started stays
   local rs=0 gw=0
   if svc_alive webui; then [[ ${ST[RERANK_STARTED]:-0} == 1 ]] && rs=1; [[ ${ST[GATEWAY_STARTED]:-1} == 1 ]] && gw=1; fi
   svc_stop webui "Open WebUI"
   svc_alive searxng && svc_stop searxng SearXNG
+  svc_alive terminal && svc_stop terminal "Open Terminal"
   if ((rs)) && rerank_best_running; then "$BASH" "$SELF" stop "${ST[PORT]}" || warn "the reranker did not stop; '$PROG ps' shows it"; fi
   if ((gw)); then svc_stop gateway; elif svc_alive gateway; then info "the gateway keeps running (Open WebUI did not start it); '$PROG gateway stop' stops it"; fi
 }
@@ -9973,20 +10209,24 @@ cmd_webui() {
       if svc_alive webui; then
         echo "Open WebUI $(pin webui): running at $(webui_urls "${ST[HOST]}" | head -n 1), pid ${ST[PID]}"
         [[ ${ST[FIRST]:-0} == 1 ]] && echo "  this computer only, until the admin account exists: '$PROG webui admin' (or create it in the browser here, then '$PROG webui restart')"
-        local rag=${ST[RAG]:-hybrid} rr=${ST[RERANKER]:-fast} se=${ST[SEARCH]:-off}
+        local rag=${ST[RAG]:-hybrid} rr=${ST[RERANKER]:-fast} se=${ST[SEARCH]:-off} te=${ST[TERMINAL]:-off}
         echo "  documents: $(webui_rag_line "$rag" "$rr")"
         if [[ $rr == best && $rag == hybrid ]] && ! rerank_best_running; then echo "  the reranker is not running, so questions about documents fail: '$PROG webui restart'"; fi
         echo "  web search: $(webui_search_line "$se")"
         if [[ $se == on ]] && ! svc_alive searxng; then echo "  SearXNG is not running, so web search fails: '$PROG webui restart'"; fi
-        if [[ $rag != "${CFG[WEBUI_RAG]}" || ($rr != "${CFG[WEBUI_RERANKER]}" && ${CFG[WEBUI_RERANKER]} != best) || $se != "${CFG[WEBUI_SEARCH]}" ]]; then
+        echo "  terminal: $(terminal_line "$te")"
+        if [[ $te != off ]] && ! svc_alive terminal; then echo "  Open Terminal is not running, so the terminal fails: '$PROG webui restart'"; fi
+        if [[ $rag != "${CFG[WEBUI_RAG]}" || ($rr != "${CFG[WEBUI_RERANKER]}" && ${CFG[WEBUI_RERANKER]} != best) || $se != "${CFG[WEBUI_SEARCH]}" || $te != "${CFG[WEBUI_TERMINAL]}" ]]; then
           echo "  the settings changed since it started; '$PROG webui restart' applies them"
         fi
       else echo "Open WebUI $(pin webui): installed, not running ('$PROG webui start')"
         echo "  documents: $(webui_rag_line "${CFG[WEBUI_RAG]}" "${CFG[WEBUI_RERANKER]}"); web search: $(webui_search_line "${CFG[WEBUI_SEARCH]}")"
+        echo "  terminal: $(terminal_line "${CFG[WEBUI_TERMINAL]}")"
       fi
       read -r n acc <<<"$(webui_accounts)"
       [[ -n $n ]] && echo "  accounts: $n$( ((acc > 0)) && echo ", $acc waiting for approval (Admin Panel > Users)")"
       echo "  data: $webui_home/data (accounts, chats, uploads); log: $logs_dir/webui.log"
+      [[ -d $terminal_home/home ]] && echo "  terminal workspace: $terminal_home/home (not in backups); log: $logs_dir/terminal.log"
       cmd_gateway_status_line ;;
   esac
   return 0
@@ -10186,13 +10426,13 @@ cmd_config() {  # list | get NAME | set NAME VALUE | unset NAME | edit [tuning]
       fi
       echo "Settings in effect (environment > $env_file > $sys_env_file > default):"
       for k in "${CFG_ORDER[@]}"; do
-        printf '  %-28s %-24s %s\n' "LLMSERVER_$k" "$(cfg_show "$k" "${CFG[$k]}")" "$(n=$(cfg_from "LLMSERVER_$k"); [[ $n == default ]] && echo "" || echo "($n)")"
+        printf '  %-33s %-24s %s\n' "LLMSERVER_$k" "$(cfg_show "$k" "${CFG[$k]}")" "$(n=$(cfg_from "LLMSERVER_$k"); [[ $n == default ]] && echo "" || echo "($n)")"
       done
       n=0
       for k in $(printf '%s\n' "${!ENVF[@]}" | sort); do
         [[ $k == LLMSERVER_* && -v CFG[${k#LLMSERVER_}] ]] && continue
         ((n++)) || echo "Other variables (paths, mirrors, and engine variables passed to every engine):"
-        printf '  %-28s %-24s (%s)\n' "$k" "$(cfg_show "$k" "$(setting "$k" "")")" "$(cfg_from "$k")"
+        printf '  %-33s %-24s (%s)\n' "$k" "$(cfg_show "$k" "$(setting "$k" "")")" "$(cfg_from "$k")"
       done
       echo "Change one with '$PROG config set NAME VALUE'; '$PROG config edit' opens the file." ;;
     get)
@@ -10213,7 +10453,10 @@ cmd_config() {  # list | get NAME | set NAME VALUE | unset NAME | edit [tuning]
       info "set $CK=$(cfg_show "$CK" "$v") in $env_file"
       [[ $CK_KIND == engine ]] && info "  $CK is passed to llmserver and every engine it starts"
       [[ -v $CK ]] && warn "$CK is also set in your environment, which takes precedence over the file"
-      if [[ $CK == LLMSERVER_WEBUI_* || $CK == LLMSERVER_GATEWAY_* ]] && svc_alive webui; then info "  Open WebUI is running: '$PROG webui restart' applies the change"; fi
+      if [[ $CK == LLMSERVER_*_VERSION ]]; then
+        n=${CK#LLMSERVER_}; n=${n%_VERSION}; n=${n,,}; [[ $n == webui_terminal ]] && n=terminal
+        info "  '$PROG upgrade $n' installs it$([[ $n == webui || $n == terminal ]] && echo ", then '$PROG webui restart'" || echo "; running models keep their build until they restart")"
+      elif [[ $CK == LLMSERVER_WEBUI_* || $CK == LLMSERVER_GATEWAY_* ]] && svc_alive webui; then info "  Open WebUI is running: '$PROG webui restart' applies the change"; fi
       return 0 ;;
     unset)
       [[ -n $a ]] || die "say which setting: '$PROG config unset NAME'"
@@ -10223,7 +10466,8 @@ cmd_config() {  # list | get NAME | set NAME VALUE | unset NAME | edit [tuning]
         [[ -v DEFAULT_CFG[${CK#LLMSERVER_}] ]] && { err=$(cfg_check "$CK" "${DEFAULT_CFG[${CK#LLMSERVER_}]}") || die "not changed: $err"; }
       fi
       cfg_write "$CK" "" 1
-      info "removed $CK from $env_file$([[ $CK == LLMSERVER_* && -v DEFAULT_CFG[${CK#LLMSERVER_}] ]] && echo "; the default applies: '${DEFAULT_CFG[${CK#LLMSERVER_}]}'")" ;;
+      [[ $CK == LLMSERVER_*_VERSION ]] && info "  '$PROG upgrade' moves back to the pinned version"
+      info "removed $CK from $env_file$([[ $CK == LLMSERVER_* && -n ${DEFAULT_CFG[${CK#LLMSERVER_}]-} ]] && echo "; the default applies: '${DEFAULT_CFG[${CK#LLMSERVER_}]}'")" ;;
     edit)
       if [[ $a == tuning ]]; then write_tuning_template 2>/dev/null || true; model_editor "$tuning_file"; info "saved; the rules apply to the next start"; return 0; fi
       [[ -z $a || $a == settings ]] || die "'$PROG config edit' opens the settings; '$PROG config edit tuning' the tuning rules; '$PROG model edit' the menu"
@@ -10273,7 +10517,7 @@ cmd_restore() {  # FILE: put a backup back (models and services must be stopped)
   [[ -n $f && -f $f ]] || die "say which backup: '$PROG restore FILE'"
   running_scan
   ((${#R_FILES[@]})) && die "stop the models first ('$PROG stop all'); nothing was changed"
-  for i in webui searxng gateway; do svc_alive "$i" && die "stop Open WebUI and the gateway first ('$PROG webui stop', '$PROG gateway stop'); nothing was changed"; done
+  for i in webui searxng terminal gateway; do svc_alive "$i" && die "stop Open WebUI and the gateway first ('$PROG webui stop', '$PROG gateway stop'); nothing was changed"; done
   py=$(helper_python) || die "restore needs llmserver's runtime: '$PROG install runtime'"
   lhome_init
   st=$(mktemp -d "$lhome/tmp/restore.XXXXXX")
