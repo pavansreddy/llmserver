@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-readonly PROG=llmserver VERSION=2.8.2
+readonly PROG=llmserver VERSION=2.8.3
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "$PROG: bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 1
 fi
@@ -1095,6 +1095,7 @@ declare -A PIN=(
   [webui]=0.12.3              # optional: Open WebUI, for 'llmserver webui' (Python 3.11-3.12; installed only on request)
   [searxng]=81371861f67226091d1c4df2e3908a11d3b54eb9   # optional: SearXNG (a commit; it has no releases), for web search in Open WebUI
   [open_terminal]=0.17.20     # optional: Open Terminal, for Open WebUI's terminal (installed with Open WebUI unless webui_terminal is off)
+  [skillspector]=c323ad4c43e3c8f2de051572cc25b2711d11e648   # NVIDIA SkillSpector v2.13.7 (a commit: it is not on PyPI); installed with the runtime unless skillspector is off
 )
 declare -A PIN_SHA=(  # file name -> sha256, from the projects' release files
   [uv-x86_64-unknown-linux-musl.tar.gz]=28d4385f9f9d1d1c7654d85b3855e0e2615b2f6cc13136a2edff858bbdc16ff1
@@ -1116,7 +1117,7 @@ declare -A PIN_SHA=(  # file name -> sha256, from the projects' release files
 declare -A PIN_SIZE=(  # MB, for the install plan
   [uv]=18 [python_helper]=35 [python_engine]=35 [helper]=25
   [llama:cpu]=22 [llama:vulkan]=35 [llama:cuda-12.8]=772 [llama:cuda-13.4]=600
-  [ollama:base]=1550 [ollama:rocm]=1050 [vllm:cuda]=10500 [vllm:rocm]=14000 [garak]=1700 [webui]=2500 [searxng]=150 [open_terminal]=80 [rerank_fast]=91 [rerank_best]=640
+  [ollama:base]=1550 [ollama:rocm]=1050 [vllm:cuda]=10500 [vllm:rocm]=14000 [garak]=1700 [webui]=2500 [searxng]=150 [open_terminal]=80 [rerank_fast]=91 [rerank_best]=640 [skillspector]=250
 )
 # llmserver's own Python packages, locked with hashes (uv pip compile --generate-hashes --universal)
 read -r -d '' HELPER_LOCK <<'LOCK' || true
@@ -1466,18 +1467,39 @@ comp_activate() {  # component staged-dir final-name: move into place, make it c
   ln -sfn -- "$id" "$root/current.new.$$" && mv -Tf -- "$root/current.new.$$" "$root/current"
   comp_prune "$1"
 }
-comp_prune() {  # keep current and previous, and any version a running model still uses
-  local root d keep cur prev f
+comp_in_use() {  # build-dir -> does anything running still use it?
+  # /proc/PID/exe alone is not enough: a venv's bin/python is a link to uv's managed Python, so a vLLM
+  # server's program lies outside its build. Its libraries and modules are mapped from the build, though,
+  # and its command line names it. A server recorded with BUILD= (from its start) counts while it lives.
+  local d=$1 r p f a=() x
+  r=$(readlink -f -- "$d" 2>/dev/null) || r=$d   # /proc shows real paths: LLMSERVER_HOME may be a link
+  for p in /proc/[0-9]*; do
+    x=$(readlink "$p/exe" 2>/dev/null) || x=""
+    [[ -n $x && ( $x == "$d"/* || $x == "$r"/* ) ]] && return 0
+    grep -qsF -e "$d/" -e "$r/" -- "$p/maps" 2>/dev/null && return 0
+    mapfile -d '' -t a 2>/dev/null < "$p/cmdline" || continue
+    for x in "${a[@]}"; do [[ $x == "$d"/* || $x == "$r"/* ]] && return 0; done
+  done
+  for f in "$run_dir"/*.state; do
+    [[ -e $f ]] || continue
+    grep -qxF -e "BUILD=$d" -e "BUILD=$r" -- "$f" 2>/dev/null || continue
+    ( load_rec "$f" && [[ -n ${ST[PID]-} ]] && pid_alive "${ST[PID]}" && [[ $(pid_starttime "${ST[PID]}") == "${ST[STARTTIME]-}" ]] ) && return 0
+  done
+  return 1
+}
+engine_build() {  # engine -> the real folder of the managed build a start uses now (nothing for your own engine)
+  [[ $(engine_source "$1") == managed ]] || return 0
+  comp_current "$1" || true
+}
+comp_prune() {  # keep current and previous, and any build a running model still uses
+  local root d cur prev
   root=$(comp_root "$1")
   cur=$(readlink -- "$root/current" 2>/dev/null || true) prev=$(readlink -- "$root/previous" 2>/dev/null || true)
   for d in "$root"/*/; do
     d=${d%/}; [[ -L $d ]] && continue
-    keep=0
-    [[ ${d##*/} == "$cur" || ${d##*/} == "$prev" ]] && keep=1
-    if ((!keep)); then   # in use by a running server?
-      for f in /proc/[0-9]*/exe; do [[ $(readlink "$f" 2>/dev/null) == "$d"/* ]] && { keep=1; break; }; done
-    fi
-    ((keep)) || { rm -rf -- "$d"; note "removed the old $1 build ${d##*/}"; }
+    [[ ${d##*/} == "$cur" || ${d##*/} == "$prev" ]] && continue
+    if comp_in_use "$d"; then note "kept the old $1 build ${d##*/}: a running server still uses it"; continue; fi
+    rm -rf -- "$d"; note "removed the old $1 build ${d##*/}"
   done
   return 0
 }
@@ -1744,11 +1766,11 @@ install_targets() {  # words -> list of components (runtime first)
   local w out=(runtime)
   for w in "$@"; do
     case $w in
-      all) out+=(llama ollama vllm) ;;
+      all) out+=(llama ollama vllm); skillspector_enabled && out+=(skillspector) ;;
       runtime) ;;
       llama|llama.cpp) out+=(llama) ;; ollama) out+=(ollama) ;; vllm) out+=(vllm) ;; webui|open-webui) out+=(webui) ;; searxng|search) out+=(searxng) ;;
-      terminal|open-terminal) out+=(terminal) ;;
-      *) die "unknown component '$w': runtime, llama, ollama, vllm, all (the engines), webui, searxng or terminal" ;;
+      terminal|open-terminal) out+=(terminal) ;; skillspector) out+=(skillspector) ;;
+      *) die "unknown component '$w': runtime, llama, ollama, vllm, all (the engines and SkillSpector), webui, searxng, terminal or skillspector" ;;
     esac
   done
   printf '%s\n' "${out[@]}" | awk '!seen[$0]++'
@@ -1763,6 +1785,7 @@ plan_line() {  # component -> "what, size" for the plan
     webui) echo "Open WebUI $(pin webui): a web chat for people on the network, with Python $(pin python_engine) and CPU PyTorch (about $((PIN_SIZE[webui] / 1000)) GB), and its document models: embeddings and the reranker (about $((PIN_SIZE[rerank_fast] + 90)) MB)$([[ ${CFG[WEBUI_SEARCH]} == on ]] && echo "; SearXNG for web search (about ${PIN_SIZE[searxng]} MB)")$([[ ${CFG[WEBUI_TERMINAL]} != off ]] && echo "; Open Terminal $(pin open_terminal) for its terminal (about ${PIN_SIZE[open_terminal]} MB)")" ;;
     terminal) echo "Open Terminal $(pin open_terminal): a terminal and file browser in Open WebUI, where models run commands, with Python $(pin python_engine) (about ${PIN_SIZE[open_terminal]} MB)" ;;
     searxng) echo "SearXNG ${PIN[searxng]:0:12}: private web search for Open WebUI, with Python $(pin python_engine) (about ${PIN_SIZE[searxng]} MB)" ;;
+    skillspector) echo "NVIDIA SkillSpector $SKILLSPECTOR_VERSION (${PIN[skillspector]:0:12}): deep checks for marketplace skills, with Python $(pin python_engine) (about ${PIN_SIZE[skillspector]} MB)" ;;
     vllm) v=$(vllm_variant); if [[ $v == none ]]; then echo "vLLM: not available here (needs an NVIDIA GPU, or AMD on x86-64)"; else local gb=${PIN_SIZE[vllm:$v]}; echo "vLLM $(pin vllm) for $v, with Python $(pin python_engine) and its own PyTorch (about $((gb / 1000)) GB)"; fi ;;
   esac
 }
@@ -1782,7 +1805,7 @@ cmd_install() {  # [component...]
   fi
   install_lock
   for c in "${targets[@]}"; do
-    case $c in runtime) install_runtime ;; llama) pins_resolve llama; install_llama ;; ollama) pins_resolve ollama; install_ollama ;; webui) install_webui ;; searxng) install_searxng ;; terminal) install_terminal ;; vllm) [[ $(vllm_variant) == none ]] && { warn "skipping vLLM: $(plan_line vllm | sed 's/^vLLM: //')"; continue; }; pins_resolve vllm; install_vllm ;; esac
+    case $c in runtime) install_runtime ;; llama) pins_resolve llama; install_llama ;; ollama) pins_resolve ollama; install_ollama ;; webui) install_webui ;; searxng) install_searxng ;; terminal) install_terminal ;; skillspector) install_skillspector ;; vllm) [[ $(vllm_variant) == none ]] && { warn "skipping vLLM: $(plan_line vllm | sed 's/^vLLM: //')"; continue; }; pins_resolve vllm; install_vllm ;; esac
   done
   rm -rf -- "$lhome"/tmp/* 2>/dev/null || true
   info "${C_B}installed${C_0}; '$PROG versions' lists what is installed"
@@ -1906,9 +1929,10 @@ cmd_upgrade() {  # [component] [--latest]
       for k in llama ollama vllm; do [[ $(engine_source "$k") == managed ]] && comp_meta "$k" && comps+=("$k"); done
       compgen -G "$lhome/tools/open-webui/*/bin/open-webui" >/dev/null && comps+=(webui)
       compgen -G "$lhome/tools/searxng/*/venv" >/dev/null && comps+=(searxng)
-      compgen -G "$lhome/tools/open-terminal/*/bin/open-terminal" >/dev/null && comps+=(terminal) ;;
-    llama.cpp) comps=(llama) ;; open-terminal) comps=(terminal) ;; runtime|llama|ollama|vllm|webui|searxng|terminal) comps=("$c") ;;
-    *) die "unknown component '$c': runtime, llama, ollama, vllm, webui, searxng or terminal" ;;
+      compgen -G "$lhome/tools/open-terminal/*/bin/open-terminal" >/dev/null && comps+=(terminal)
+      compgen -G "$lhome/tools/skillspector/*/bin/skillspector" >/dev/null && comps+=(skillspector) ;;
+    llama.cpp) comps=(llama) ;; open-terminal) comps=(terminal) ;; runtime|llama|ollama|vllm|webui|searxng|terminal|skillspector) comps=("$c") ;;
+    *) die "unknown component '$c': runtime, llama, ollama, vllm, webui, searxng, terminal or skillspector" ;;
   esac
   if ((opt_latest)); then
     if ((dry)); then   # a dry run asks upstream, but installs nothing and writes no pins
@@ -1920,7 +1944,7 @@ cmd_upgrade() {  # [component] [--latest]
         info "$c: LLMSERVER_$k=${CFG[$k]} is set and wins over --latest; '$PROG config unset ${k,,}' to follow the latest release"
         continue
       fi
-      if [[ $c == searxng ]]; then info "searxng stays at the commit this llmserver pins (${PIN[searxng]:0:12}); a new llmserver release brings a new pin"; continue; fi
+      if [[ $c == searxng || $c == skillspector ]]; then info "$c stays at the commit this llmserver pins (${PIN[$c]:0:12}); a new llmserver release brings a new pin"; continue; fi
       latest_of "$c" || die "$LT_ERR"
       [[ -z $LT_ERR ]] || die "$LT_ERR; staying on $(pin "$pn")"
       if [[ $c == webui || $c == terminal ]] && [[ $LT_TAG != "${PIN[$pn]}" ]]; then
@@ -1948,6 +1972,7 @@ tool_versions() {  # webui | terminal | searxng -> the versions installed in too
     webui) for d in "$lhome/tools/open-webui"/*/; do [[ -x ${d}bin/open-webui ]] && basename -- "$d"; done ;;
     terminal) for d in "$lhome/tools/open-terminal"/*/; do [[ -x ${d}bin/open-terminal ]] && basename -- "$d"; done ;;
     searxng) for d in "$lhome/tools/searxng"/*/; do [[ -x ${d}venv/bin/granian ]] && basename -- "$d"; done ;;
+    skillspector) for d in "$lhome/tools/skillspector"/*/; do [[ -x ${d}bin/skillspector ]] && basename -- "$d"; done ;;
   esac
   return 0
 }
@@ -2026,10 +2051,11 @@ cmd_versions() {  # [--json]
     fi
   done
   local label want dir
-  for c in webui searxng terminal; do
+  for c in webui searxng terminal skillspector; do
     case $c in
       webui) label="(Open WebUI; '$PROG webui status')" want=$(pin webui) dir=$lhome/tools/open-webui ;;
       searxng) label="(web search for Open WebUI)" want=${PIN[searxng]:0:12} dir=$lhome/tools/searxng ;;
+      skillspector) label="(NVIDIA SkillSpector $SKILLSPECTOR_VERSION, checks marketplace skills)" want=${PIN[skillspector]:0:12} dir=$lhome/tools/skillspector ;;
       terminal) label="(Open Terminal for Open WebUI)" want=$(pin open_terminal) dir=$lhome/tools/open-terminal ;;
     esac
     while IFS= read -r v; do
@@ -2546,7 +2572,7 @@ trustpy() {  # the gate's helper, on llmserver's own Python
   py_env env T_HUB="$hub" T_RECDIR="$trust_rec_dir" T_LEVEL="$SEC_LEVEL" T_VERIFY="${CFG[VERIFY]}" T_REF="$TP_REF" T_REFNAME="$TP_REFNAME" \
     T_ACCEPT="$TP_ACCEPT" T_RC_OK="$TP_RCOK" T_APPROVE="$TP_APPROVE" T_MANIFEST="$TP_MANIFEST" T_OUT="$TP_OUT" \
     T_SKILLS_MIRROR="$(setting LLMSERVER_SKILLS_MIRROR "")" T_CACHE="$trust_dir/cache" T_GH_API="$GH_API" \
-    T_SCANNERS="${CFG[SCANNERS]}" T_PYPI="$PYPI" T_SKILLSPECTOR="${CFG[SKILLSPECTOR]}" \
+    T_SCANNERS="${CFG[SCANNERS]}" T_PYPI="$PYPI" T_SKILLSPECTOR="$(skillspector_want)" \
     T_REVIEW_MODEL="$TP_REVIEW_MODEL" T_REVIEW_URL="$TP_REVIEW_URL" T_REVIEW_KEY="$TP_REVIEW_KEY" T_REVIEW_ERR="$TP_REVIEW_ERR" \
     T_ALLOW_PICKLE="$([[ ${CFG[ALLOW_PICKLE]} == on ]] && echo 1 || echo 0)" T_ATTACHED="$( [[ -n ${CFG[OLLAMA_ATTACH]} ]] && echo 1 || echo 0)" \
     "$py" -I - "$@" <<'TRUSTPY'
@@ -3888,6 +3914,9 @@ def cmd_sbom(lhome, pinsfile, version):
             comp('application', 'cpython', meta['VERSION'], 'pkg:generic/python.org/cpython@%s' % meta['VERSION'], (), {'use': 'llmserver helper'}, 'cpython-helper')
         elif kind == 'vllm':
             comp('application', 'cpython', meta.get('PYTHON', ''), 'pkg:generic/python.org/cpython@%s' % meta.get('PYTHON', ''), (), {'use': 'vLLM'}, 'cpython-vllm')
+    ss = pins.get('skillspector', '')
+    if ss and os.path.isfile(os.path.join(lhome, 'tools', 'skillspector', ss[:12], 'bin', 'skillspector')):
+        comp('application', 'skillspector', ss, 'pkg:github/NVIDIA/skillspector@%s' % ss, (), {'use': 'skill checks'})
     seen = set()
     for lock in sorted(os.listdir(os.path.join(lhome, 'locks'))) if os.path.isdir(os.path.join(lhome, 'locks')) else []:
         if not lock.endswith('.txt'): continue
@@ -6896,6 +6925,9 @@ skill_stage() {  # name stage-dir -> plan file SK_PLAN and its lines SK_LINES
     SK_LINES=$(TP_OUT=$SK_PLAN trustpy skill-local "$name" "$st/$name" generated "$SK_GEN")
   else
     skill_name_ok "$name" || trust_exit 3 "'$name' is not a skill name"
+    if skillspector_enabled && [[ ${CFG[SKILLSPECTOR]} == auto && ${CFG[AUTO_INSTALL]} == on ]] && ((!dry)) && ! skillspector_installed; then
+      ( install_skillspector ) || warn "SkillSpector could not be installed; the skill gets llmserver's own checks only"   # a home set up before it came with the install
+    fi
     skills_review_prep
     [[ -n $TP_REVIEW_MODEL && -z $TP_REVIEW_ERR ]] && info "SkillSpector's review runs on $TP_REVIEW_MODEL through the gateway; this can take some minutes"
     SK_LINES=$(TP_OUT=$SK_PLAN TP_ACCEPT="${opt_accept[*]}" trustpy skill-fetch "$name" "$st")
@@ -7556,6 +7588,92 @@ install_garak() {
   rm -rf -- "$d"; mv -- "$st/venv" "$d"; rm -rf -- "$st"
   log_write info "installed garak $(pin garak) into $d"
 }
+
+# ---- NVIDIA SkillSpector ----
+# The deep checker for marketplace skills. It is part of llmserver's install: 'setup', 'install all'
+# and 'install skillspector' install it, unless LLMSERVER_SKILLSPECTOR or LLMSERVER_SCANNERS is off.
+# Its source comes from the pinned commit (it is not on PyPI), checked by its content SHA-256 like SearXNG;
+# its packages are hash-locked; it runs from that checked source, so no build backend ever runs.
+# LLMSERVER_SKILLSPECTOR=auto uses this copy first, then one on PATH; a full path uses that program.
+readonly SKILLSPECTOR_VERSION=2.13.7   # the release at PIN[skillspector]
+readonly SKILLSPECTOR_TREE=a72d87f6d7a6ba745fa82503af15f8cc13e2b9418e8a26bfcece939af3012837   # src/skillspector, pyproject.toml, LICENSE
+skillspector_dir() { printf '%s\n' "$lhome/tools/skillspector/${PIN[skillspector]:0:12}"; }
+skillspector_installed() { [[ -x $(skillspector_dir)/bin/skillspector && -f $(skillspector_dir)/src/src/skillspector/cli_entry.py ]]; }
+skillspector_enabled() { [[ ${CFG[SKILLSPECTOR]} != off && ${CFG[SCANNERS]} != off ]]; }
+skillspector_exe() {  # -> the SkillSpector program llmserver uses (its own copy first), or nothing
+  case ${CFG[SKILLSPECTOR]} in
+    off) return 0 ;;
+    auto) if skillspector_installed; then printf '%s\n' "$(skillspector_dir)/bin/skillspector"; else command -v skillspector 2>/dev/null || true; fi ;;
+    *) printf '%s\n' "${CFG[SKILLSPECTOR]}" ;;
+  esac
+  return 0
+}
+skillspector_want() {  # -> what the gate's helper gets in T_SKILLSPECTOR: off, a program, or auto (none found: 'not-run')
+  local e
+  [[ ${CFG[SKILLSPECTOR]} == off ]] && { echo off; return 0; }
+  e=$(skillspector_exe); printf '%s\n' "${e:-auto}"
+}
+install_skillspector() {
+  local c d st py lock got sp
+  c=${PIN[skillspector]} d=$(skillspector_dir) py=$(pin python_engine)
+  skillspector_installed && return 0
+  install_runtime
+  info "installing NVIDIA SkillSpector $SKILLSPECTOR_VERSION (source ${c:0:12}, about ${PIN_SIZE[skillspector]} MB) to check marketplace skills"
+  st=$(stage_dir skillspector)
+  note "download: $GH/NVIDIA/skillspector/archive/$c.tar.gz (checked by its content SHA-256 $SKILLSPECTOR_TREE)"
+  if curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 30 --max-redirs 5 -o "$st/src.tar.gz" -- "$GH/NVIDIA/skillspector/archive/$c.tar.gz" 2>>"$st/err"; then
+    mkdir -p "$st/x"; untar_safe "$st/src.tar.gz" "$st/x"
+    local top=("$st/x"/*/)   # GitHub names the folder after the repository: SkillSpector-COMMIT
+    [[ ${#top[@]} -eq 1 && -d ${top[0]} && ${top[0],,} == *"/skillspector-$c/" ]] || { rm -rf -- "$st"; die "the SkillSpector archive does not have the expected layout"; }
+    mv -- "${top[0]%/}" "$st/src"
+  elif have git; then   # the archive host is unreachable: the same commit with git (the content check below decides)
+    note "the archive did not download ($(tr '\n' ' ' < "$st/err")); fetching commit $c with git"
+    if ! { git init -q "$st/src" && git -C "$st/src" fetch -q --depth 1 "$GH/NVIDIA/skillspector.git" "$c" && git -C "$st/src" -c advice.detachedHead=false checkout -q FETCH_HEAD; }; then
+      rm -rf -- "$st"; die "could not download SkillSpector (from $GH, as an archive or with git); check the network or LLMSERVER_GITHUB"
+    fi
+    rm -rf -- "$st/src/.git"
+  else
+    rm -rf -- "$st"; die "could not download SkillSpector from $GH; check the network or LLMSERVER_GITHUB"
+  fi
+  got=$(src_treehash "$st/src" src/skillspector pyproject.toml LICENSE) || got=""
+  [[ $got == "$SKILLSPECTOR_TREE" ]] || { rm -rf -- "$st"; die "the SkillSpector source does not match llmserver's pin (content SHA-256 $got, expected $SKILLSPECTOR_TREE); nothing was installed"; }
+  find "$st/src" -mindepth 1 -maxdepth 1 ! -name src ! -name pyproject.toml ! -name LICENSE -exec rm -rf -- {} +
+  find "$st/src/src" -mindepth 1 -maxdepth 1 ! -name skillspector -exec rm -rf -- {} +
+  uvc python install "$py" --no-bin >/dev/null 2>&1 || uvc python install "$py" --no-bin || die "uv could not install Python $py"
+  lock=$lhome/locks/skillspector-${c:0:12}.txt
+  if [[ ! -s $lock ]]; then   # its dependencies, read from pyproject.toml (static metadata: nothing is built)
+    uvc pip compile "$st/src/pyproject.toml" --python-version "${py%.*}" --generate-hashes \
+      --no-header --quiet -o "$lock.tmp" || { rm -rf -- "$lock.tmp" "$st"; die "could not resolve SkillSpector's packages"; }
+    mv -f -- "$lock.tmp" "$lock"
+  fi
+  uvc venv --relocatable --python "$py" --no-project --quiet "$st/venv" || { rm -rf -- "$st"; die "could not create SkillSpector's venv"; }
+  uvc pip sync --quiet --require-hashes --python "$st/venv/bin/python" "$lock" || { rm -rf -- "$st"; die "could not install SkillSpector's packages (hash-checked against $lock)"; }
+  # run from the checked source: a .pth with a relative path (the folder can move), and a minimal
+  # dist-info, because SkillSpector reads its version and commit from its package metadata
+  sp=$(py_env "$st/venv/bin/python" -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])') || { rm -rf -- "$st"; die "SkillSpector's venv has no site-packages"; }
+  py_env "$st/venv/bin/python" -I - "$sp" "$st/src/src" "$SKILLSPECTOR_VERSION" "$c" <<'PY' || { rm -rf -- "$st"; die "could not register SkillSpector in its venv"; }
+import json, os, sys
+sp, src, ver, commit = sys.argv[1:5]
+open(os.path.join(sp, 'skillspector-src.pth'), 'w').write(os.path.relpath(src, sp) + '\n')
+di = os.path.join(sp, 'skillspector-%s.dist-info' % ver); os.makedirs(di)
+open(os.path.join(di, 'METADATA'), 'w').write('Metadata-Version: 2.1\nName: skillspector\nVersion: %s\nLicense: Apache-2.0\n' % ver)
+open(os.path.join(di, 'INSTALLER'), 'w').write('llmserver\n')
+json.dump({'url': 'https://github.com/NVIDIA/skillspector', 'vcs_info': {'vcs': 'git', 'commit_id': commit}}, open(os.path.join(di, 'direct_url.json'), 'w'))
+PY
+  mkdir -p "$st/bin"
+  cat > "$st/bin/skillspector" <<'SH'
+#!/bin/sh
+# made by llmserver: NVIDIA SkillSpector from its checked source, on its own hash-locked packages
+d=$(cd -- "$(dirname -- "$0")/.." && pwd -P) || exit 1
+PYTHONDONTWRITEBYTECODE=1 exec "$d/venv/bin/python" -I -c 'import sys; sys.argv[0] = "skillspector"; from skillspector.cli_entry import app; sys.exit(app())' "$@"
+SH
+  chmod 755 "$st/bin/skillspector"
+  py_env "$st/bin/skillspector" --version >/dev/null 2>&1 || { rm -rf -- "$st"; die "the installed SkillSpector does not start"; }
+  chmod -R go-w -- "$st/venv" "$st/src" "$st/bin"
+  rm -rf -- "$d"; mkdir -p "$d"; mv -- "$st/src" "$d/src"; mv -- "$st/venv" "$d/venv"; mv -- "$st/bin" "$d/bin"; rm -rf -- "$st"
+  log_write info "installed NVIDIA SkillSpector $SKILLSPECTOR_VERSION (${c:0:12}) into $d"
+  tool_prune "${d%/*}" "${d##*/}" skillspector
+}
 cmd_eval() {  # MODEL [--garak] [--probes LIST] [--json]
   local base key="" rec res out k a b c d e tot=0 bad=0 rows=() gd rep opts
   helper_python >/dev/null || runtime_ready || die "eval needs llmserver's runtime; run '$PROG install runtime'"
@@ -8181,10 +8299,10 @@ dfind() { D_LEVEL+=("$1") D_CHECK+=("$2") D_MSG+=("$3"); }   # level (ok|info|wa
 doctor_skillspector() {  # NVIDIA SkillSpector: used for marketplace skills when present
   local exe v
   [[ ${CFG[SKILLSPECTOR]} == off || ${CFG[SCANNERS]} == off ]] && { [[ ${CFG[SKILLS_REVIEW]} == off ]] || dfind warn skills "LLMSERVER_SKILLS_REVIEW is set, but SkillSpector is off"; return 0; }
-  if [[ ${CFG[SKILLSPECTOR]} == auto ]]; then exe=$(command -v skillspector 2>/dev/null || true); else exe=${CFG[SKILLSPECTOR]}; fi
+  exe=$(skillspector_exe)
   if [[ -z $exe ]]; then
-    [[ ${CFG[SKILLS_REVIEW]} == off ]] || dfind warn skills "LLMSERVER_SKILLS_REVIEW is set, but skillspector is not on PATH"
-    dfind info skills "NVIDIA SkillSpector is not installed: marketplace skills get llmserver's own checks only (install it with 'uv tool install git+https://github.com/NVIDIA/skillspector.git' for deeper checks)"
+    [[ ${CFG[SKILLS_REVIEW]} == off ]] || dfind warn skills "LLMSERVER_SKILLS_REVIEW is set, but SkillSpector is not installed"
+    dfind warn skills "NVIDIA SkillSpector is not installed: marketplace skills get llmserver's own checks only; '$PROG install skillspector' installs the pinned, checked copy"
     return 0
   fi
   v=$(timeout 20 env -i PATH="$PATH" HOME="$HOME" "$exe" --version 2>/dev/null | tail -n 1); v=${v:-unknown version}
@@ -8474,11 +8592,37 @@ sandbox_base() {  # /dev binding words -> SB_BASE: what every sandbox shares
   # your other programs (your shell, your agent) cannot reach your files or secrets.
   # /run/user/UID holds the sockets of your session (D-Bus, systemd, the SSH agent, the keyring):
   # a read-only bind does not stop a connection to a socket, so the folder is replaced by an empty one.
-  local run; run=/run/user/$(id -u)
-  SB_BASE=("$(command -v bwrap)" --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --ro-bind / / "$@" --proc /proc
-    --tmpfs /tmp --tmpfs /var/tmp --tmpfs "$HOME" --tmpfs "$lhome")
+  # Other disks are hidden too: under WSL, /mnt/c is the Windows user's files; /media and /run/media hold
+  # USB disks; LLMSERVER_SANDBOX_HIDE adds more folders. Bind sources come from the host, so the model
+  # store, engines and other folders a sandbox needs are bound back after this, even when they live there.
+  local run m; run=/run/user/$(id -u)
+  SB_BASE=("$(command -v bwrap)" --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --ro-bind / / "$@" --proc /proc)
+  for m in /mnt /media /run/media $(setting LLMSERVER_SANDBOX_HIDE ""); do
+    m=${m%/}
+    if [[ $m != /* || -z $m ]]; then warn "LLMSERVER_SANDBOX_HIDE: '$m' is not an absolute folder; ignored"; continue; fi
+    [[ -d $m && ! -L $m ]] || continue
+    case $m in /proc|/proc/*|/dev|/dev/*|/usr|/usr/*|/etc|/lib*|/bin|/sbin) warn "LLMSERVER_SANDBOX_HIDE: '$m' is needed to run anything; ignored"; continue ;; esac
+    SB_BASE+=(--tmpfs "$m")
+  done
+  SB_BASE+=(--tmpfs /tmp --tmpfs /var/tmp --tmpfs "$HOME" --tmpfs "$lhome")
   [[ -d $run ]] && SB_BASE+=(--tmpfs "$run")
   [[ -n ${XDG_RUNTIME_DIR-} && -d $XDG_RUNTIME_DIR && $XDG_RUNTIME_DIR != "$run" && $XDG_RUNTIME_DIR != /tmp* && $XDG_RUNTIME_DIR != "$HOME"* ]] && SB_BASE+=(--tmpfs "$XDG_RUNTIME_DIR")
+  return 0
+}
+sandbox_gpu_devs() {  # -> SB_DEV: an engine's /dev. A fresh one (null, zero, random, tty, a private shm) with
+  # only the GPU device nodes bound in: NVIDIA, AMD (kfd, dri), Vulkan (dri), WSL2 (dxg) and InfiniBand for NCCL.
+  # The host's other devices (disks, input, its /dev/shm shared with your programs) stay out.
+  # LLMSERVER_SANDBOX_DEV=all binds the whole /dev, as llmserver 2.8.2 did, for a device this list misses.
+  local p
+  case $(setting LLMSERVER_SANDBOX_DEV gpu) in
+    all) SB_DEV=(--dev-bind /dev /dev); return 0 ;;
+    gpu) ;;
+    *) warn "LLMSERVER_SANDBOX_DEV must be gpu or all; using gpu" ;;
+  esac
+  SB_DEV=(--dev /dev)
+  for p in /dev/nvidia* /dev/dri /dev/kfd /dev/dxg /dev/infiniband; do
+    [[ -e $p ]] && SB_DEV+=(--dev-bind "$p" "$p")
+  done
   return 0
 }
 sandbox_plan() {  # engine -> SANDBOX_ARGV (empty when not sandboxed), SANDBOX_NOTE, SANDBOX_KIND
@@ -8496,7 +8640,8 @@ sandbox_plan() {  # engine -> SANDBOX_ARGV (empty when not sandboxed), SANDBOX_N
   fi
   cache=$state_dir/sandbox/$e
   (umask 077; mkdir -p "$cache")
-  sandbox_base --dev-bind /dev /dev
+  sandbox_gpu_devs
+  sandbox_base "${SB_DEV[@]}"
   SANDBOX_ARGV=("${SB_BASE[@]}" --bind "$cache" "$HOME/.cache"
     --ro-bind-try "$lhome/engines" "$lhome/engines" --ro-bind-try "$lhome/python" "$lhome/python")   # the software only: never the settings, key, logs or records
   [[ -d $hub ]] && SANDBOX_ARGV+=(--ro-bind "$hub" "$hub")
@@ -8525,7 +8670,20 @@ sandbox_plan() {  # engine -> SANDBOX_ARGV (empty when not sandboxed), SANDBOX_N
   done
   SANDBOX_ARGV+=(--)
   SANDBOX_KIND=bwrap
-  SANDBOX_NOTE="sandbox: bubblewrap (read-only system, empty home, own processes only, no session sockets, no llmserver settings or key, model files read-only)"
+  SANDBOX_NOTE="sandbox: bubblewrap (read-only system, empty home, no other disks under /mnt or /media, $([[ ${SB_DEV[0]} == --dev ]] && echo 'GPU devices only' || echo 'all of /dev'), own processes only, no session sockets, no llmserver settings or key, model files read-only)"
+}
+vllm_flashinfer_env() {  # S_ENV: turn off vLLM's FlashInfer sampler when its kernels can be neither loaded nor built
+  # A managed CUDA build without FlashInfer's precompiled kernels (KERNELS=none: none were published for its
+  # PyTorch, or they did not install) compiles them at the first start, with nvcc and ninja. Without those,
+  # vLLM fails in its warm-up ("No such file or directory: 'ninja'"). Its own PyTorch sampler works without them.
+  local meta
+  [[ -v VLLM_USE_FLASHINFER_SAMPLER || -v ENVF[VLLM_USE_FLASHINFER_SAMPLER] ]] && return 0   # yours wins
+  [[ $(engine_source vllm) == managed ]] || return 0
+  meta=$(comp_meta vllm && printf '%s %s\n' "${CM[VARIANT]-}" "${CM[KERNELS]:-none}") || return 0   # (a subshell: CM stays)
+  [[ $meta == "cuda none" ]] || return 0
+  if have ninja && { have nvcc || [[ -x ${CUDA_HOME:-/usr/local/cuda}/bin/nvcc ]]; }; then return 0; fi
+  S_ENV+=(VLLM_USE_FLASHINFER_SAMPLER=0)
+  info "vLLM: FlashInfer's precompiled kernels are not installed and nvcc or ninja is missing, so its FlashInfer sampler is off (VLLM_USE_FLASHINFER_SAMPLER=0; set it yourself to override)"
 }
 model_role() {  # -> rerank or embedding when the engine flags make this model a reranker or an embedding server (not for chat)
   local t
@@ -8566,7 +8724,8 @@ build_command() {  # ENGINE MODEL HOST PORT CTX EXTRA pass[] and the checked rec
       [[ $T_RCOK == 1 ]] && ! user_wants_rc && S_ARGV+=(--trust-remote-code)
       [[ $CTX != auto ]] && S_ARGV+=(--max-model-len "$CTX")
       S_ARGV+=("${AUTO_FLAGS[@]}" "${USER_FLAGS[@]}")
-      S_ENV+=(HF_HUB_OFFLINE=1) ;;
+      S_ENV+=(HF_HUB_OFFLINE=1)
+      vllm_flashinfer_env ;;
     ollama)
       for t in "${extra_arr[@]}" "${pass[@]}"; do
         [[ $t =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "'ollama serve' takes no flags; '$t' must be a KEY=VALUE setting such as OLLAMA_NUM_PARALLEL=2"
@@ -8851,6 +9010,7 @@ run_setup() {
   [[ $auth != none ]] && ! is_loopback "$host" && ensure_key
   info "wrote $env_file ('$PROG config' shows and changes the settings)"
   local todo=()
+  skillspector_enabled && ! skillspector_installed && [[ ${CFG[SKILLSPECTOR]} == auto ]] && todo+=(skillspector)   # part of the install: skills get its checks
   for e in "${engines[@]}"; do
     [[ $e == ollama && -n $attach ]] && continue
     engine_installed "$e" && continue
@@ -9466,6 +9626,11 @@ MENU, SELF, BASH = E.get('GW_MENU', ''), E.get('GW_SELF', ''), E.get('GW_BASH', 
 START_TIMEOUT = int(E.get('GW_START_TIMEOUT') or 1020)
 ROUTES = ('/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/responses')
 RERANK = ('/v1/rerank', '/rerank', '/v1/reranking')   # to a reranker (a llama.cpp model started with --reranking)
+# which servers each endpoint may reach, by the ROLE in their record ('' = a chat model). An embedding-only
+# server never gets a chat request, and a reranker gets only reranking.
+ELIGIBLE = {'/v1/chat/completions': ('',), '/v1/completions': ('',), '/v1/responses': ('',),
+            '/v1/embeddings': ('', 'embedding')}
+ELIGIBLE.update({p: ('rerank',) for p in RERANK})
 MAX_BODY = 64 << 20
 SLOTS = threading.BoundedSemaphore(int(E.get('GW_MAX_CONN') or 64))
 LOCK = threading.Lock()                           # the shared counters
@@ -9619,8 +9784,9 @@ class H(BaseHTTPRequestHandler):
         except (ValueError, OSError): return self.error(400, 'the request body is not JSON')
         if not isinstance(body, dict): return self.error(400, 'the request body is not a JSON object')
         role = 'rerank' if path in RERANK else None
+        roles = ELIGIBLE[path]
         def pick():
-            return {k: v for k, v in backends().items() if (v['role'] == 'rerank') == (role == 'rerank') or (path == '/v1/embeddings' and v['role'] == 'embedding')}
+            return {k: v for k, v in backends().items() if v['role'] in roles}
         b = pick(); want = body.get('model')
         if not want and len(b) == 1: want = next(iter(b))
         if want not in b and role is None:
@@ -9842,20 +10008,22 @@ install_webui() {
 # ---- SearXNG ----
 searxng_dir() { printf '%s\n' "$lhome/tools/searxng/${PIN[searxng]:0:12}"; }
 searxng_installed() { [[ -x $(searxng_dir)/venv/bin/granian && -f $(searxng_dir)/src/searx/webapp.py ]]; }
-searxng_treehash() {  # dir -> SHA-256 over searx/ and the requirements: the pin, whichever way the source came
-  "$(helper_python)" -I - "$1" <<'PY'
+src_treehash() {  # dir package-folder file... -> SHA-256 over the package folder and the named files: a source pin,
+  # whichever way the source came (archive or git)
+  "$(helper_python)" -I - "$@" <<'PY'
 import hashlib, os, sys
-root, out = sys.argv[1], []
-for dp, dns, fns in os.walk(os.path.join(root, 'searx')):
+root, pkg, files, out = sys.argv[1], sys.argv[2], sys.argv[3:], []
+for dp, dns, fns in os.walk(os.path.join(root, pkg)):
     for fn in fns:
         p = os.path.join(dp, fn)
         h = 'link:' + os.readlink(p) if os.path.islink(p) else hashlib.sha256(open(p, 'rb').read()).hexdigest()
         out.append('%s  %s\n' % (h, os.path.relpath(p, root)))
-for f in ('requirements.txt', 'requirements-server.txt', 'LICENSE'):
+for f in files:
     out.append('%s  %s\n' % (hashlib.sha256(open(os.path.join(root, f), 'rb').read()).hexdigest(), f))
 print(hashlib.sha256(''.join(sorted(out)).encode()).hexdigest())
 PY
 }
+searxng_treehash() { src_treehash "$1" searx requirements.txt requirements-server.txt LICENSE; }   # dir -> the SearXNG pin
 install_searxng() {
   local c d st py lock got
   c=${PIN[searxng]} d=$(searxng_dir) py=$(pin python_engine)
@@ -10809,6 +10977,7 @@ fi
 if [[ -n $RESTART_FILE ]]; then
   P_EVICT=("$RESTART_FILE" "${P_EVICT[@]}")
 fi
+USER_OFFLOAD=0
 optional=$(( ${#P_EVICT[@]} - P_FORCED - (${#RESTART_FILE} > 0 ? 1 : 0) ))
 if [[ $P_STATE == no && -n ${R_ERR:-} && $R_ERR == *MAX_MODELS* ]]; then die "$R_ERR; nothing was changed. Unpin one ('$PROG unpin MODEL') or raise LLMSERVER_MAX_MODELS"; fi
 if ((${#P_EVICT[@]} > (${#RESTART_FILE} > 0 ? 1 : 0))); then
@@ -10838,7 +11007,7 @@ if ((${#P_EVICT[@]} > (${#RESTART_FILE} > 0 ? 1 : 0))); then
         case ${reply,,} in
           y|yes) note "user agreed to stop: $(tr -s ' \n' ' ' <<<"$list")" ;;
           o) [[ -n $alt ]] || die "cancelled; nothing was changed"
-             P_EVICT=("${P_EVICT[@]:0:P_FORCED}"); note "user chose CPU offload instead of evicting" ;;
+             P_EVICT=("${P_EVICT[@]:0:P_FORCED}"); USER_OFFLOAD=1; note "user chose CPU offload instead of evicting" ;;
           *) die "cancelled; nothing was changed" ;;
         esac
       else
@@ -10847,6 +11016,7 @@ if ((${#P_EVICT[@]} > (${#RESTART_FILE} > 0 ? 1 : 0))); then
       fi ;;
   esac
 fi
+APPROVED_EVICT=("${P_EVICT[@]}")   # what this run may stop: the start re-plans under the lock and stays inside it
 sim_evict "${P_EVICT[@]}"
 advise "$ENGINE" "$MODEL" place "$CTX" ||
   die "$SPEC will not run well enough on this machine now (VRAM_GUARD=${CFG[VRAM_GUARD]}); nothing was downloaded or stopped. '$PROG capacity' shows what is using the GPUs; --no-vram-guard tries anyway"
@@ -10949,25 +11119,42 @@ fi
 
 # ---- start -------------------------------------------------------------------
 mkdir -p "$state_dir" "$log_dir" "$run_dir"
+replan_locked() {  # under the start lock: plan again from what runs now. The plan above was made before the
+  # check and the download, without the lock, so another start may have finished meanwhile and taken the
+  # port, GPU memory or a MAX_MODELS slot, and released the lock again: re-plan every time, not only after a wait.
+  local sig0 sig1 f e ok
+  sig0="$PORT|${PLACE_IDX[*]}|${P_EVICT[*]}|$F_RATING|${F_CTX-}"
+  running_scan
+  if [[ -z $RESTART_FILE ]] && f=$(rec_find "$SPEC"); then
+    load_rec "$f"; info "$SPEC was started meanwhile by another $PROG; it is running at $(rec_url)"; exit 0
+  fi
+  if [[ -n $RESTART_FILE && ! -e $RESTART_FILE ]]; then RESTART_FILE=""; fi   # stopped meanwhile: a plain start now
+  if ((!ATTACHED)); then pick_port "$SPEC" "${opt_port:-$PORT_TOKEN}"; fi
+  plan_start "$ENGINE" "$MODEL" "$CTX"
+  if [[ $P_STATE == no && ${R_ERR:-} == *MAX_MODELS* ]]; then die "$R_ERR (another start took the slot meanwhile); nothing was changed"; fi
+  if { ((opt_offload)) || ((USER_OFFLOAD)); } && [[ $P_STATE == evict ]]; then P_EVICT=("${P_EVICT[@]:0:P_FORCED}"); P_STATE=offload; fi
+  [[ -n $RESTART_FILE ]] && P_EVICT=("$RESTART_FILE" "${P_EVICT[@]}")
+  if [[ $evict_policy != lru ]]; then   # never stop a model the user (or the policy) did not agree to
+    for e in "${P_EVICT[@]}"; do
+      ok=0; for f in "${APPROVED_EVICT[@]}"; do [[ $f == "$e" ]] && { ok=1; break; }; done
+      ((ok)) || die "the running models changed while $SPEC was being prepared, and it would now need $(load_rec "$e" && echo "${ST[SPEC]}" || echo 'another model') stopped; nothing was changed. Run the command again"
+    done
+  fi
+  sim_evict "${P_EVICT[@]}"; advise "$ENGINE" "$MODEL" place "$CTX" 2 || die "$F_MSG (the running models changed meanwhile); nothing was changed"
+  sig1="$PORT|${PLACE_IDX[*]}|${P_EVICT[*]}|$F_RATING|${F_CTX-}"
+  if [[ $sig1 != "$sig0" ]]; then
+    info "the running models changed while $SPEC was being prepared; planned again (port $PORT${PLACE_IDX[*]:+, GPU ${PLACE_IDX[*]}})"
+    PLAN_IDX=("${PLACE_IDX[@]}")
+    prepare_command
+  fi
+}
 if have flock; then
   exec 9> "$lock_file"
   if ! flock -n 9; then
     info "$(lock_owner) is starting or stopping a model; waiting for it (up to 10 minutes)"
     flock -w 600 9 || die "gave up waiting for $(lock_owner); nothing was changed"
-    # the other run may have changed what is running, and taken the port: plan again
-    running_scan
-    if [[ -z $RESTART_FILE ]] && f=$(rec_find "$SPEC"); then
-      load_rec "$f"; info "$SPEC was started meanwhile by the other $PROG; it is running at $(rec_url)"; exit 0
-    fi
-    if ((!ATTACHED)); then pick_port "$SPEC" "${opt_port:-$PORT_TOKEN}"; fi
-    plan_start "$ENGINE" "$MODEL" "$CTX"
-    [[ -n $RESTART_FILE ]] && P_EVICT=("$RESTART_FILE" "${P_EVICT[@]}")
-    if [[ $P_STATE == evict && $evict_policy != lru ]] && ((${#P_EVICT[@]} > 0)); then
-      die "the GPUs changed while waiting, and $SPEC would now need other models stopped; run the command again"
-    fi
-    sim_evict "${P_EVICT[@]}"; advise "$ENGINE" "$MODEL" place "$CTX" 2 || die "$F_MSG; nothing was changed"
-    prepare_command
   fi
+  replan_locked
 fi
 printf '%s %s\n' "$$" "$SPEC" > "$lock_file.owner" 2>/dev/null || true
 find_interrupted
@@ -11012,7 +11199,7 @@ else
   # recorded at once, so a crash from here on leaves a record (and the port taken)
   rec_write "$run_dir/$id.state" "ENGINE=$ENGINE" "MODEL=$MODEL" "SPEC=$SPEC" "HOST=$HOST" "PORT=$PORT" "PID=$S_PID" \
     "STARTTIME=$(pid_starttime "$S_PID" || true)" "MANAGED=1" "LOG=$S_LOG" "STARTED=$(date +%s)" "CTX=$CTX" "STATE=starting" "RUN=$RUN_ID" "OWNER=$$" \
-    "COMMIT=$T_COMMIT" "TRUST=$T_STATUS" "TRUST_RECORD=${T_REC##*/}" "SANDBOX=${SANDBOX_KIND}" "ROLE=$(model_role)"
+    "COMMIT=$T_COMMIT" "TRUST=$T_STATUS" "TRUST_RECORD=${T_REC##*/}" "SANDBOX=${SANDBOX_KIND}" "ROLE=$(model_role)" "BUILD=$( ((ATTACHED)) || engine_build "$ENGINE")"
   ports_set "$SPEC" "$PORT"
   wait_ready && rc=0 || rc=$?
   case $rc in
@@ -11043,7 +11230,7 @@ fi
 rec_write "$run_dir/$id.state" "ENGINE=$ENGINE" "MODEL=$MODEL" "SPEC=$SPEC" "HOST=$HOST" "PORT=$PORT" "PID=$S_PID" \
   "STARTTIME=$([[ -n $S_PID ]] && pid_starttime "$S_PID" || true)" "MANAGED=$( ((ATTACHED)) && echo 0 || echo 1)" "LOG=$S_LOG" \
   "STARTED=$(date +%s)" "CTX=$CTX" "DRAFT=${D_SPEC:+$D_SPEC x$D_N}" "TUNE=${TUNE_ENV[*]}" "EST=$est" "MEAS=$meas" "RUN=$RUN_ID" "STATE=ready" \
-  "COMMIT=$T_COMMIT" "TRUST=$T_STATUS" "TRUST_RECORD=${T_REC##*/}" "SANDBOX=${SANDBOX_KIND}" "ROLE=$(model_role)"
+  "COMMIT=$T_COMMIT" "TRUST=$T_STATUS" "TRUST_RECORD=${T_REC##*/}" "SANDBOX=${SANDBOX_KIND}" "ROLE=$(model_role)" "BUILD=$( ((ATTACHED)) || engine_build "$ENGINE")"
 ((ATTACHED)) || ports_set "$SPEC" "$PORT"
 trap - INT TERM HUP
 for d in "${STOPPED_SNAP[@]}"; do rm -rf -- "$d"; done   # the start succeeded: nothing to roll back

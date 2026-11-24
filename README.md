@@ -2,7 +2,7 @@
 
 **Run local LLMs on Linux with one command. Every download is checked, every engine is sandboxed, and each model gets its own OpenAI-compatible endpoint.**
 
-![version](https://img.shields.io/badge/version-2.8.2-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+![version](https://img.shields.io/badge/version-2.8.3-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 llmserver is a single bash script. It installs and runs **llama.cpp**, **vLLM** and **Ollama** for you. Before a model starts, llmserver:
 
@@ -71,13 +71,18 @@ You do not need Python. llmserver installs its own.
 
 ### Install
 
-Download `llmserver` and `SHA256SUMS` from the [latest release](../../releases/latest). Then:
+Download `llmserver` and `SHA256SUMS` for a release tag, check, and install:
 
 ```bash
+V=2.8.3                                                   # the release you want (see the Releases page)
+curl -fsSLO "https://raw.githubusercontent.com/pavansreddy/llmserver/$V/llmserver"
+curl -fsSLO "https://raw.githubusercontent.com/pavansreddy/llmserver/$V/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS                  # must show: llmserver: OK
 chmod +x llmserver && mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
-llmserver --version                                       # llmserver 2.8.2
+llmserver --version                                       # llmserver 2.8.3
 ```
+
+These URLs read the files committed at the release tag, so they work whether or not the release has files attached. When a release does list `llmserver` and `SHA256SUMS` under *Assets*, downloading those is the same thing.
 
 ### Set up
 
@@ -472,6 +477,8 @@ Install bubblewrap (`sudo apt install bubblewrap`) and run `llmserver doctor` to
 
 - a read-only system;
 - an empty home: no SSH keys, cloud credentials or your files;
+- no other disks: `/mnt` (under WSL, your Windows drives), `/media` and `/run/media` are hidden. `LLMSERVER_SANDBOX_HIDE="/data /srv"` hides more folders. The model store and engines are shown again, read-only, wherever they live;
+- engines see only the GPU devices (`/dev/nvidia*`, `/dev/dri`, `/dev/kfd`, `/dev/dxg` on WSL2, `/dev/infiniband`), with a private `/dev/shm`. If an engine needs a device this misses, `LLMSERVER_SANDBOX_DEV=all` gives it all of `/dev`, as before 2.8.3;
 - read-only model files;
 - no view of your settings, API key or logs;
 - their own process namespace;
@@ -574,7 +581,7 @@ Marketplace skills pass up to three layers of checks before install. llmserver n
 | Layer | What it checks | When |
 |---|---|---|
 | **llmserver's own checks** | Only text files, with size limits. No open security issues on GitHub. No download-and-run commands, credential reads, hidden characters or injected instructions. Every file is hashed | Always |
-| **NVIDIA SkillSpector, static** | 71 patterns in 17 categories: code analysis, data-flow tracking, YARA signatures, dependency vulnerabilities (OSV.dev), prompt injection, exfiltration, excessive agency, MCP tool poisoning | When `skillspector` is on `PATH` |
+| **NVIDIA SkillSpector, static** | 71 patterns in 17 categories: code analysis, data-flow tracking, YARA signatures, dependency vulnerabilities (OSV.dev), prompt injection, exfiltration, excessive agency, MCP tool poisoning | Always, unless `skillspector off` (installed by `setup`) |
 | **SkillSpector, LLM review** | The intent behind the text, which patterns cannot see. It runs on **your own model, through the gateway**, so the skill never leaves this computer | When you set `skills_review` |
 
 SkillSpector's verdict decides as follows:
@@ -586,10 +593,13 @@ SkillSpector's verdict decides as follows:
 | `DO_NOT_INSTALL` | Refused (`--accept-risk S-SKILLSPECTOR` overrides it) | Refused |
 | Incomplete analysis, an error, or a review that did not run | Asks | Refused |
 
+SkillSpector is part of llmserver's install. `setup` and `install all` install it, and the first marketplace skill check installs it if it's missing (with `auto_install on`). It comes from a pinned commit (v2.13.7), checked by content SHA-256, with hash-locked packages, in `~/.llmserver/tools/skillspector`. llmserver runs it from that checked source and never builds it.
+
 ```bash
-uv tool install git+https://github.com/NVIDIA/skillspector.git   # once; llmserver does not install it
-llmserver doctor                                                 # shows whether SkillSpector is used
-llmserver config set skills_review MODEL                         # optional: the LLM review on a running model
+llmserver install skillspector                   # install it now (about 250 MB)
+llmserver doctor                                 # shows whether SkillSpector is used
+llmserver config set skills_review MODEL         # optional: the LLM review on a running model
+llmserver config set skillspector off            # skip it; or a full path to use your own copy
 ```
 
 SkillSpector gets a clean environment: no cloud keys, and never a hosted model. Its dependency check sends package names (not file contents) to OSV.dev.
@@ -602,7 +612,7 @@ SkillSpector gets a clean environment: no cloud keys, and never a hosted model. 
 
 ```bash
 llmserver install all -n          # show the plan
-llmserver install llama ollama    # or: vllm, runtime, webui, searxng, terminal
+llmserver install llama ollama    # or: vllm, runtime, webui, searxng, terminal, skillspector
 llmserver versions                # what is installed
 llmserver versions --latest       # also the newest upstream releases, and what upgrade would change (changes nothing)
 llmserver upgrade                 # your chosen versions, else the pinned ones, of everything installed
@@ -622,6 +632,7 @@ Running models keep their engine until you restart them. `--latest` covers uv, l
 | Runtime | uv 0.13.4, Python 3.14.8 | One build for all |
 | Open WebUI | 0.12.3 | CPU PyTorch |
 | Open Terminal | 0.17.20 | — |
+| NVIDIA SkillSpector | v2.13.7 (commit `c323ad4c43e3`) | Python 3.12. Stays at its pinned commit, like SearXNG |
 
 ### Choose versions
 
@@ -678,7 +689,7 @@ Values are read in this order; later ones win: `/etc/llmserver_env` → `~/.llms
 | `vram_guard` · `vram_reserve_mb` | `enforce` · `512` | Fit enforcement, and memory kept free on each GPU |
 | `security` · `sandbox` · `scanners` | `standard` · `auto` · `auto` | Security level, bubblewrap, local scanners |
 | `lock_models` | `off` | Write the checked commit into the menu |
-| `skillspector` · `skills_review` | `auto` · `off` | Check marketplace skills with NVIDIA SkillSpector (`auto` when on `PATH`, `off`, or its path), and run its LLM review on a model the gateway serves |
+| `skillspector` · `skills_review` | `auto` · `off` | Check marketplace skills with NVIDIA SkillSpector (`auto`: llmserver's own copy, else one on `PATH`; `off`; or its path), and run its LLM review on a model the gateway serves |
 | `model_store` | `shared` | `shared` caches or `private` (`~/.llmserver/models`) |
 | `gateway_host` · `gateway_port` | `127.0.0.1` · `8000` | Gateway address |
 | `gateway_autoload` · `gateway_idle_stop` | `off` · `0` | Start models on demand, and the idle stop in minutes |
@@ -737,6 +748,7 @@ Start with `llmserver doctor`, then `llmserver doctor --fix`. After a crash or p
 | `needs these models stopped … no terminal` | Use `--evict` or `--offload`, or stop a model |
 | `will not run well enough` | `llmserver check MODEL`, then use a recommended quant or context |
 | vLLM: too little memory for the KV cache | Use a smaller `--ctx`, or add `-- --gpu-memory-utilization 0.9` |
+| vLLM: `No such file or directory: 'ninja'` | FlashInfer's kernels are missing and can't be compiled here. Since 2.8.3 llmserver turns the FlashInfer sampler off by itself; if you set `VLLM_USE_FLASHINFER_SAMPLER` yourself, unset it, or install `ninja` and a CUDA toolkit |
 | `no Q4_K_M GGUF in ...` | Use the name shown, for example `llama:ORG/REPO-GGUF:Q4_0`; `model add` picks the quant itself when the repo has only one |
 | `N%-on-cpu` in `ps` (Ollama) | Stop other models, then `llmserver MODEL --restart` |
 | `needs glibc 2.39` | `llmserver config set llama_build vulkan`, or use your own engine |
@@ -888,5 +900,5 @@ llmserver does not include the programs it installs. It downloads them on your c
 - **SearXNG:** AGPL-3.0. It is installed from its pinned source with its license; llmserver adds only a version file.
 - **Open Terminal** (MIT).
 - **llama.cpp** (MIT), **vLLM** (Apache-2.0), **Ollama** (MIT), **uv** (Apache-2.0 or MIT).
-- **NVIDIA SkillSpector** (Apache-2.0) is optional and not installed by llmserver. llmserver only calls it when you have installed it.
+- **NVIDIA SkillSpector** (Apache-2.0). llmserver installs it from its pinned source, with its license.
 - **Each model** has its own license. `llmserver trust show MODEL` shows it.

@@ -1,4 +1,4 @@
-# llmserver 2.8.2 — Operator manual
+# llmserver 2.8.3 — Operator manual
 
 This manual uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
 
@@ -129,6 +129,23 @@ The version settings of 2.8.1 were tested in a test home: `config set`, `get`, `
 
 The changes of 2.8.2 were tested with the real runtime and the real PyPI: `versions --latest` (text and JSON) found the newest vLLM, Open WebUI and Open Terminal, and showed `?` with the reason for the GitHub components, because the GitHub API was not available on the test network. The GitHub part was tested with a simulated GitHub: a newer llama.cpp release, an Ollama release without checksums, an engine from `PATH`, an Open WebUI that is not the version in its setting, and a computer without a GPU for vLLM. `upgrade --latest -n` was tested with the real PyPI and a simulated GitHub: it showed the new versions in the plan, did not install the runtime and did not write `pins.local`.
 
+The changes of 2.8.3 were tested on Ubuntu 26.04 (bash 5.3, Python 3.14, bubblewrap, two NVIDIA GPUs), each time with the functions taken from the script itself, and the 2.8.2 script for comparison:
+
+- The gateway ran against three simulated servers: a chat model, an embedding server and a reranker. 2.8.3 passed 9 of 9 checks. 2.8.2 failed 3: it sent chat and completion requests to the embedding server, and a request without a model name failed.
+- Old builds: 2.8.2 deleted a build that a running process used through a library or its command line, as in the reported problem. 2.8.3 kept it, also through `BUILD=` in a live record, and still removed a build that nothing used.
+- The sandbox: `/mnt` and `LLMSERVER_SANDBOX_HIDE` folders were hidden; a folder bound again after the mask was visible; disks and input devices were not visible; `/dev/shm` was private; both GPUs were visible (`nvidia-smi` in the sandbox); `LLMSERVER_SANDBOX_DEV=all` restored all of `/dev`.
+- The plan under the start lock was tested with simulated plans: no change, a port taken meanwhile, an eviction that was not approved (refused), an approved eviction, `evict lru`, `--offload` and a full `MAX_MODELS`.
+- The SearXNG content hash is the same as in 2.8.2. The SkillSpector archive from GitHub matches the pinned content hash, and the folder check of the installer accepts its layout.
+- `install skillspector --yes` was run in a new test home with the real GitHub and PyPI: it installed the runtime and SkillSpector 2.13.7 (232 MB, 75 packages in the lock file, with hashes). `--version`, `versions` and `doctor` showed it, and a second `install` changed nothing. With the options that llmserver uses (`--no-llm`), it rated a harmless test skill `SAFE` and a skill with a download-and-run command, a read of `~/.ssh` and an injected instruction `DO_NOT_INSTALL` (score 71, 4 findings).
+
+- `skills check` with the real Hugging Face skills marketplace and the installed SkillSpector: `hf-mem` passed (`SAFE`), and `huggingface-gradio` was refused (an open security issue, `CAUTION`, 75% coverage). The LLM review ran on Qwen3-0.6B (llama.cpp, CPU, in the sandbox) through the gateway: 10 requests, no error. A model this small gives poor reviews (it rated `hf-mem` `DO_NOT_INSTALL`); use a capable model for `skills_review`.
+- vLLM 0.32.0 served Qwen3-0.6B on an RTX A4000 in the sandbox with only the GPU devices, and answered correctly. Its processes have no program inside the build (the venv's Python is a link to uv's Python), as in the reported problem, but `/proc/PID/maps` shows the build. Two upgrades while it ran kept its build ("kept the old vllm build 0.32.0-cuda: a running server still uses it") and it kept answering; after the stop, the next upgrade removed it.
+- ShellCheck 0.11.0 found no errors or warnings, and the same 3 style notes as in 2.8.2.
+
+- vLLM without FlashInfer's kernels: when its precompiled FlashInfer kernels did not install (`KERNELS=none` in the build) and `nvcc` or `ninja` is missing, vLLM 0.32.0 did not start in 2.8.2, with or without the sandbox (`FileNotFoundError: 'ninja'` in its sampler warm-up). This was reproduced on the test computer. 2.8.3 then starts vLLM with `VLLM_USE_FLASHINFER_SAMPLER=0` and says so; vLLM started and answered correctly. A `VLLM_USE_FLASHINFER_SAMPLER` that you set yourself is used as it is. A build with the kernels is not changed.
+
+These were not tested: WSL2 (`/dev/dxg`, `/mnt/c`) and AMD GPUs.
+
 The vLLM installation method was tested on a small package only. GPU operation was tested with simulated GPUs only. Before your first real start, use `llmserver check`, `llmserver capacity` and `--dry-run`.
 
 ---
@@ -182,7 +199,7 @@ Make sure that the computer agrees with these requirements:
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.8.2`.
+   Result: The command shows `llmserver 2.8.3`.
 
 ### 2.3 Do the setup
 
@@ -987,12 +1004,20 @@ There are two types of skills:
 
 #### Use NVIDIA SkillSpector for deeper checks
 
-SkillSpector is a security scanner for agent skills from NVIDIA (Apache-2.0). It finds more than the checks of llmserver: 71 patterns in 17 categories, an analysis of the code and of the data flow, YARA signatures, and known vulnerabilities in the dependencies of a skill. It never runs the skill. llmserver does not install it, but it uses it for each marketplace skill when it is installed.
+SkillSpector is a security scanner for agent skills from NVIDIA (Apache-2.0). It finds more than the checks of llmserver: 71 patterns in 17 categories, an analysis of the code and of the data flow, YARA signatures, and known vulnerabilities in the dependencies of a skill. It never runs the skill.
 
-1. Install SkillSpector:
+SkillSpector is part of the llmserver installation. `setup` and `install all` install it, and the first check of a marketplace skill installs it when it is missing (with `LLMSERVER_AUTO_INSTALL=on`). llmserver installs it with uv:
+
+- the source of the pinned commit (v2.13.7, `c323ad4c43e3`), from GitHub as an archive or with `git`. It is not on PyPI. The source must match a pinned content SHA-256 (over `src/skillspector`, `pyproject.toml` and `LICENSE`), or nothing is installed;
+- its packages from a lock file with hashes (`~/.llmserver/locks/skillspector-*.txt`), with Python 3.12, in its own venv;
+- the program runs from the checked source. It is never built, so no build backend runs.
+
+It goes into `~/.llmserver/tools/skillspector/COMMIT`. `llmserver versions` lists it, `upgrade` keeps it at the pinned commit (like SearXNG), and the SBOM lists it.
+
+1. Install SkillSpector (`setup` already did this, unless `skillspector` is `off`):
 
    ```bash
-   uv tool install git+https://github.com/NVIDIA/skillspector.git
+   llmserver install skillspector
    ```
 
 2. Do a check:
@@ -1018,7 +1043,7 @@ SkillSpector is a security scanner for agent skills from NVIDIA (Apache-2.0). It
 
 > **NOTE:** The dependency check of SkillSpector sends the names and versions of the packages that a skill declares to OSV.dev. It does not send the files. Without network access, SkillSpector uses a small list of its own.
 
-> **NOTE:** To stop the use of SkillSpector, type `llmserver config set skillspector off`. To use a copy that is not on `PATH`, give its full path: `llmserver config set skillspector /opt/skillspector/bin/skillspector`.
+> **NOTE:** To stop the use of SkillSpector, type `llmserver config set skillspector off`; `setup` then does not install it. With `auto`, llmserver uses its own copy, else a `skillspector` on `PATH`. To use another copy, give its full path: `llmserver config set skillspector /opt/skillspector/bin/skillspector`.
 
 #### Let a local model review the skills
 
@@ -2081,6 +2106,12 @@ Each engine also gets a clean environment, with or without the sandbox. It gets 
 
 > **NOTE:** If an engine needs to write to a different folder, add the folder to `LLMSERVER_SANDBOX_RW` (absolute paths, separated by spaces).
 
+> **NOTE:** Since 2.8.3, the sandbox hides the other disks: `/mnt` (under WSL2, the Windows drives such as `/mnt/c`), `/media` and `/run/media`. To hide more folders, set `LLMSERVER_SANDBOX_HIDE` (absolute paths, separated by spaces), for example `LLMSERVER_SANDBOX_HIDE="/data /srv"`. The model store, the engines and the folders in `LLMSERVER_SANDBOX_RW` are bound again after this, so they stay visible wherever they are.
+
+> **NOTE:** Since 2.8.3, an engine gets a new `/dev` with only the GPU devices: `/dev/nvidia*`, `/dev/dri`, `/dev/kfd`, `/dev/dxg` (WSL2) and `/dev/infiniband`, and a private `/dev/shm`. The other devices of the computer, and its shared memory with your programs, are not visible. If an engine needs a device that is not in this list (the engine log shows a device error), set `LLMSERVER_SANDBOX_DEV=all` to give it all of `/dev`, as before 2.8.3.
+
+> **NOTE:** The sandbox does not block the network. A model that you approved to run its own Python code (`trust approve --remote-code`) can still send what it can read. Hiding the other disks makes that set smaller.
+
 > **NOTE:** The sandbox does not limit the network. llmserver starts the engines offline, but code in a model could still connect to the network. It could also connect to abstract sockets (for example an X11 display) and to the system D-Bus.
 
 ### 4.18 Test the behaviour of a model
@@ -2462,8 +2493,10 @@ Put the settings in `~/.llmserver/llmserver.env`.
 | `LLMSERVER_WEBUI_TERMINAL`, `_WEBUI_TERMINAL_PORT` | `on`, `8889` | The terminal in Open WebUI: `on` (sandbox), `host` (no sandbox) or `off`; its port on `127.0.0.1` (see [3.37](#337-let-the-models-use-a-terminal-open-terminal)) |
 | `LLMSERVER_LLAMA_VERSION`, `_OLLAMA_VERSION`, `_VLLM_VERSION`, `_WEBUI_VERSION`, `_WEBUI_TERMINAL_VERSION` | empty (the specified version) | The version that `install` and `upgrade` install (see [3.38](#338-choose-the-versions)) |
 | `LLMSERVER_SANDBOX_RW` | empty | More folders that the engines can write in the sandbox (absolute paths) |
+| `LLMSERVER_SANDBOX_HIDE` | empty | More folders that every sandbox hides, after `/mnt`, `/media` and `/run/media` (absolute paths) |
+| `LLMSERVER_SANDBOX_DEV` | `gpu` | `gpu`: an engine sees only the GPU devices. `all`: all of `/dev` |
 | `LLMSERVER_SCANNERS` | `auto` | `auto` uses `clamscan`, `modelscan` and `gitleaks` if they are on `PATH`. `off` (also stops SkillSpector) |
-| `LLMSERVER_SKILLSPECTOR` | `auto` | `auto` uses NVIDIA SkillSpector for marketplace skills if it is on `PATH`. `off`. Or the full path of the program |
+| `LLMSERVER_SKILLSPECTOR` | `auto` | `auto` uses llmserver's own NVIDIA SkillSpector (installed by `setup`), else one on `PATH`, for marketplace skills. `off` (and `setup` does not install it). Or the full path of the program |
 | `LLMSERVER_SKILLS_REVIEW` | `off` | `off`, or the name of a model that the gateway serves: SkillSpector's LLM review uses that model (see [3.25](#325-install-skills-for-ai-agents)) |
 | `LLMSERVER_TRUST_SIGNERS` | empty | An ssh `allowed_signers` file. Bundles must have a good signature from one of its keys. Necessary with `strict` |
 | `LLMSERVER_SKILLS` | `ask` | `ask`, `on` or `off`: `setup` offers, installs or skips the generated skills |
