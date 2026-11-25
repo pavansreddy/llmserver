@@ -40,7 +40,7 @@
 
 set -euo pipefail
 
-readonly PROG=llmserver VERSION=2.8.3
+readonly PROG=llmserver VERSION=2.8.4
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "$PROG: bash 4.4 or newer is required (this is $BASH_VERSION)" >&2; exit 1
 fi
@@ -749,7 +749,7 @@ declare -A CFG=(
   [LLAMA_SOURCE]=managed      # managed: llmserver's own copy in LLMSERVER_HOME; system: from PATH; or the program's path or folder
   [VLLM_SOURCE]=managed
   [OLLAMA_SOURCE]=managed
-  [LLAMA_BUILD]=auto          # auto | cpu | vulkan | cuda-12.8 | cuda-13.4 (managed llama.cpp)
+  [LLAMA_BUILD]=auto          # auto | cpu | vulkan | cuda-12 | cuda-13 (managed llama.cpp)
   [AUTO_INSTALL]=on           # on: install the small Python runtime on first use; off: only on 'install'
   [VRAM_GUARD]=enforce        # off | warn | enforce (refuse what will not run) | strict
   [VRAM_RESERVE_MB]=512       # headroom kept free on top of the estimate
@@ -867,7 +867,7 @@ LLMSERVER_GPUS=$(env_val "${CFG[GPUS]}")
 LLMSERVER_LLAMA_SOURCE=$(env_val "${CFG[LLAMA_SOURCE]}")
 LLMSERVER_VLLM_SOURCE=$(env_val "${CFG[VLLM_SOURCE]}")
 LLMSERVER_OLLAMA_SOURCE=$(env_val "${CFG[OLLAMA_SOURCE]}")
-# llama.cpp build: auto (picked from the GPUs and driver) | cpu | vulkan | cuda-12.8 | cuda-13.4
+# llama.cpp build: auto (picked from the GPUs and driver) | cpu | vulkan | cuda-12 | cuda-13
 LLMSERVER_LLAMA_BUILD=$(env_val "${CFG[LLAMA_BUILD]}")
 # on: install the small Python runtime (uv, Python, helper) automatically when first needed
 LLMSERVER_AUTO_INSTALL=$(env_val "${CFG[AUTO_INSTALL]}")
@@ -1035,7 +1035,7 @@ validate_config() {
   [[ $SEC_LEVEL == strict && ${CFG[VERIFY]} == off ]] && die "LLMSERVER_VERIFY=off is not allowed with SECURITY=strict"
   [[ ${CFG[NUMA]} =~ ^(auto|off)$ ]] || die "LLMSERVER_NUMA must be 'auto' or 'off'"
   [[ ${CFG[TUNING]} =~ ^(on|off)$ ]] || die "LLMSERVER_TUNING must be 'on' or 'off'"
-  [[ ${CFG[LLAMA_BUILD]} =~ ^(auto|cpu|vulkan|cuda-12\.8|cuda-13\.4)$ ]] || die "LLMSERVER_LLAMA_BUILD must be auto, cpu, vulkan, cuda-12.8 or cuda-13.4"
+  [[ ${CFG[LLAMA_BUILD]} =~ ^(auto|cpu|vulkan|cuda-1[23](\.[0-9]+)?)$ ]] || die "LLMSERVER_LLAMA_BUILD must be auto, cpu, vulkan, cuda-12 or cuda-13 (the release's newest CUDA build of that major version)"
   [[ ${CFG[AUTO_INSTALL]} =~ ^(on|off)$ ]] || die "LLMSERVER_AUTO_INSTALL must be 'on' or 'off'"
   [[ ${CFG[LLAMA_VERSION]} =~ ^(b?[0-9]{1,6})?$ ]] || die "LLMSERVER_LLAMA_VERSION must be a llama.cpp release such as b11798 (empty = the pinned one), got '${CFG[LLAMA_VERSION]}'"
   [[ ${CFG[OLLAMA_VERSION]} =~ ^(v?[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?)?$ ]] || die "LLMSERVER_OLLAMA_VERSION must be an Ollama release such as v0.40.7 (empty = the pinned one), got '${CFG[OLLAMA_VERSION]}'"
@@ -1116,7 +1116,7 @@ declare -A PIN_SHA=(  # file name -> sha256, from the projects' release files
 )
 declare -A PIN_SIZE=(  # MB, for the install plan
   [uv]=18 [python_helper]=35 [python_engine]=35 [helper]=25
-  [llama:cpu]=22 [llama:vulkan]=35 [llama:cuda-12.8]=772 [llama:cuda-13.4]=600
+  [llama:cpu]=22 [llama:vulkan]=35 [llama:cuda-12]=772 [llama:cuda-13]=600
   [ollama:base]=1550 [ollama:rocm]=1050 [vllm:cuda]=10500 [vllm:rocm]=14000 [garak]=1700 [webui]=2500 [searxng]=150 [open_terminal]=80 [rerank_fast]=91 [rerank_best]=640 [skillspector]=250
 )
 # llmserver's own Python packages, locked with hashes (uv pip compile --generate-hashes --universal)
@@ -1564,7 +1564,32 @@ runtime_ready() {  # make sure the helper exists; installs it on first use unles
   ( install_runtime ) || { warn "could not install llmserver's Python runtime; models cannot be sized until '$PROG install runtime' succeeds"; return 1; }
 }
 
-llama_variant() {  # the llama.cpp build for this machine: cuda-13.4 | cuda-12.8 | vulkan | cpu
+llama_variant() {  # the llama.cpp build for this machine: cuda-13.N | cuda-12.N | vulkan | cpu
+  # llama.cpp moves its CUDA builds along (13.4 -> 13.5 ...): the exact one comes from the release's own
+  # file list (the digests in the pins); before those are known, the family alone (cuda-13) is printed
+  local fam a v k vs=() known=0
+  fam=$(llama_family)
+  [[ $fam == cuda-* ]] || { echo "$fam"; return; }
+  a=$(arch_of llama) || { echo "$fam"; return; }
+  v=$(pin llama)
+  for k in "${!PIN_SHA[@]}" "${!PINL[@]}"; do
+    k=${k#sha:}
+    [[ $k == "llama-$v-bin-"* ]] && known=1
+    [[ $k =~ ^llama-$v-bin-ubuntu-(cuda-[0-9]+\.[0-9]+)-$a\.tar\.gz$ ]] && vs+=("${BASH_REMATCH[1]}")
+  done
+  k=$(printf '%s\n' "${vs[@]}" | grep -E "^${fam%%.*}\." | sort -V | tail -n 1)
+  [[ -n $k ]] && { echo "$k"; return; }
+  if ((known)); then   # the release is known and has no build of that family: the older CUDA, else Vulkan
+    v=${NV_DRIVER%%.*}; [[ $v =~ ^[0-9]+$ ]] || v=0
+    if [[ ${fam%%.*} == cuda-13 && $a == x64 ]] && ((v >= 570)); then
+      k=$(printf '%s\n' "${vs[@]}" | grep -E '^cuda-12\.' | sort -V | tail -n 1)
+      [[ -n $k ]] && { echo "$k"; return; }
+    fi
+    echo vulkan; return
+  fi
+  echo "${fam%%.*}"
+}
+llama_family() {  # cuda-13 | cuda-12 | vulkan | cpu (LLMSERVER_LLAMA_BUILD, or picked from the GPUs and driver)
   local want=${CFG[LLAMA_BUILD]} i nv=0 amd=0 mincc="" drv
   detect_hw
   for i in "${!G_VENDOR[@]}"; do
@@ -1572,11 +1597,11 @@ llama_variant() {  # the llama.cpp build for this machine: cuda-13.4 | cuda-12.8
     if [[ ${G_VENDOR[i]} == nvidia ]]; then nv=1; [[ -z $mincc ]] || ! ver_ge "${G_CAP[i]:-0}" "$mincc" && mincc=${G_CAP[i]:-0}
     else amd=1; fi
   done
-  if [[ $want != auto ]]; then echo "$want"; return; fi
+  if [[ $want != auto ]]; then echo "${want%%.*}"; return; fi
   drv=${NV_DRIVER%%.*}
   if ((nv && !amd)) && [[ $drv =~ ^[0-9]+$ ]]; then
-    if ((drv >= 580)) && ver_ge "${mincc:-0}" 7.5; then echo cuda-13.4; return; fi
-    if ((drv >= 570)) && [[ $(arch_of llama) == x64 ]]; then echo cuda-12.8; return; fi
+    if ((drv >= 580)) && ver_ge "${mincc:-0}" 7.5; then echo cuda-13; return; fi
+    if ((drv >= 570)) && [[ $(arch_of llama) == x64 ]]; then echo cuda-12; return; fi
   fi
   if ((nv || amd)); then echo vulkan; else echo cpu; fi
 }
@@ -1588,6 +1613,7 @@ install_llama() {
   local var ver f st top need id cr
   install_runtime
   var=$(llama_variant); ver=$(pin llama)
+  [[ $var =~ ^cuda-[0-9]+$ ]] && die "llama.cpp $ver: the SHA-256 digests of its $var build are not known, so it cannot be verified; '$PROG upgrade llama --latest' fetches the newest release's, or 'llmserver config set llama_build vulkan'"
   f=$(llama_asset "$var") || die "llama.cpp publishes no Linux build for $(uname -m)"
   need=2.35; [[ $var == cuda-* ]] && need=2.39
   ver_ge "$(glibc_ver)" "$need" || die "the $var build of llama.cpp needs glibc $need or newer (this system has $(glibc_ver)); to use a llama.cpp you built: '$PROG config set llama_source system'"
@@ -1779,7 +1805,7 @@ plan_line() {  # component -> "what, size" for the plan
   local v
   case $1 in
     runtime) echo "runtime: uv $(pin uv) and Python $(pin python_helper) with llmserver's helper packages (about $((PIN_SIZE[uv] + PIN_SIZE[python_helper] + PIN_SIZE[helper])) MB)" ;;
-    llama) v=$(llama_variant); echo "llama.cpp $(pin llama), $v build (about ${PIN_SIZE[llama:$v]:-40} MB)" ;;
+    llama) v=$(llama_variant); echo "llama.cpp $(pin llama), $v build (about ${PIN_SIZE[llama:${v%%.*}]:-40} MB)" ;;
     ollama) v=$(ollama_variant); local mb=${PIN_SIZE[ollama:base]}; local extra=${PIN_SIZE[ollama:rocm]}; [[ $v == rocm ]] && mb=$((mb + extra))
       echo "Ollama $(pin ollama)$([[ $v == rocm ]] && echo ' + ROCm libraries' || true) (about $mb MB)" ;;
     webui) echo "Open WebUI $(pin webui): a web chat for people on the network, with Python $(pin python_engine) and CPU PyTorch (about $((PIN_SIZE[webui] / 1000)) GB), and its document models: embeddings and the reranker (about $((PIN_SIZE[rerank_fast] + 90)) MB)$([[ ${CFG[WEBUI_SEARCH]} == on ]] && echo "; SearXNG for web search (about ${PIN_SIZE[searxng]} MB)")$([[ ${CFG[WEBUI_TERMINAL]} != off ]] && echo "; Open Terminal $(pin open_terminal) for its terminal (about ${PIN_SIZE[open_terminal]} MB)")" ;;
@@ -1829,6 +1855,23 @@ gh_release() {  # owner/repo [tag] -> the tag, then "name sha256" per asset (Git
   curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -H 'Accept: application/vnd.github+json' "$url" |
     "$py" -I -c 'import json,sys; r=json.load(sys.stdin); print(r["tag_name"]); [print(a["name"], (a.get("digest") or "").removeprefix("sha256:")) for a in r.get("assets", [])]' 2>/dev/null
 }
+gh_release_newest() {  # owner/repo tag-regex -> like gh_release, for the newest release whose tag matches and
+  # that has Linux files with digests. GitHub's "latest" label can sit on a release that is not a build
+  # (llama.cpp's v1.0.0 holds only a text file), so the label is not followed. llama.cpp marks its bNNNNN
+  # builds as pre-releases, so the tag pattern, not that mark, says which releases count.
+  local py
+  py=$(helper_python) || die "the helper Python is needed; run '$PROG install runtime'"
+  curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -H 'Accept: application/vnd.github+json' "$GH_API/repos/$1/releases?per_page=30" |
+    "$py" -I -c '
+import json, re, sys
+rx = re.compile(sys.argv[1])
+for r in json.load(sys.stdin):
+    if r.get("draft") or not rx.fullmatch(r.get("tag_name", "")): continue
+    a = r.get("assets", [])
+    if not any(("linux" in x["name"] or "ubuntu" in x["name"]) and x.get("digest") for x in a): continue
+    print(r["tag_name"]); [print(x["name"], (x.get("digest") or "").removeprefix("sha256:")) for x in a]
+    break' "$2" 2>/dev/null
+}
 # A version from LLMSERVER_*_VERSION that is not the pin needs facts the script does not carry: the
 # SHA-256 digests GitHub publishes for the llama.cpp and Ollama release files, and the ROCm wheel tag
 # for vLLM. They are fetched once and kept in pins.local; with no digest, there is no download.
@@ -1871,6 +1914,12 @@ pins_resolve() {  # component
     *) return 0 ;;
   esac
   ((${#lines[@]})) && pins_save "${lines[@]}"
+  if [[ $c == llama ]]; then   # with the release's file list known, the CUDA build is the one it ships
+    var=$(llama_variant); f=$(llama_asset "$var") || return 0
+    missing=("$f"); [[ $var == cuda-* ]] && missing+=("cudart-$f")
+    [[ $var =~ ^cuda-[0-9]+$ ]] && die "the llama release $v has no Linux $var build with SHA-256 digests; choose another release, 'llmserver config set llama_build vulkan', or '$PROG config unset ${s,,}'"
+    [[ $var == vulkan && ${CFG[LLAMA_BUILD]} != vulkan && $(llama_family) == cuda-* ]] && warn "the llama release $v has no CUDA build for this machine; using its Vulkan build"
+  fi
   if [[ $c != vllm ]]; then
     for f in "${missing[@]}"; do
       [[ -n $(pin_sha "$([[ $c == ollama ]] && echo "$f@$v" || echo "$f")") ]] ||
@@ -1896,7 +1945,9 @@ latest_of() {  # component -> LT_TAG (newest upstream), LT_LINES (what pins.loca
   case $c in
     llama|ollama|runtime)
       case $c in llama) repo=ggml-org/llama.cpp ;; ollama) repo=ollama/ollama ;; *) repo=astral-sh/uv ;; esac
-      out=$(gh_release "$repo" 2>/dev/null) && [[ -n $out ]] || { LT_ERR="could not ask GitHub for the latest $repo release"; return 1; }
+      if [[ $c == llama ]]; then out=$(gh_release_newest "$repo" 'b[0-9]+' 2>/dev/null) || true
+      else out=$(gh_release "$repo" 2>/dev/null) || true; fi
+      [[ -n $out ]] || { LT_ERR="could not ask GitHub for the latest $repo release"; return 1; }
       LT_TAG=${out%%$'\n'*}
       [[ $LT_TAG =~ ^[A-Za-z0-9._+-]+$ ]] || { LT_TAG="" LT_ERR="GitHub gave an unexpected tag for $repo"; return 1; }
       while read -r name sha; do
@@ -4968,10 +5019,15 @@ def main(cmd, *a):
                 tree = json.loads(get('%s/api/models/%s/tree/main?recursive=true' % (HF, a[0])))
                 want = None if a[1] == 'latest' else a[1].upper()
                 files = [(e['path'], int(e.get('size') or 0)) for e in tree if e.get('type') == 'file' and e.get('path', '').endswith('.gguf')]
-                main = [(p, sz) for p, sz in files if 'mmproj' not in p.lower() and (quant_of(p) or '').upper() == (want or 'Q4_K_M')]
-                if not main:   # the same rule as the security check: no quant given means Q4_K_M
+                want = want or 'Q4_K_M'
+                gg = [(p, sz) for p, sz in files if 'mmproj' not in p.lower()]
+                main = [(p, sz) for p, sz in gg if (quant_of(p) or '').upper() == want]
+                if not main:
+                    main = sorted((p, sz) for p, sz in gg if want in p.upper().rsplit('/', 1)[-1])
+                    main = [(p, sz) for p, sz in main if quant_of(p) == quant_of(main[0][0])] if main else []
+                if not main:   # the same rule as the security check: no quant given means Q4_K_M; Q4_K_M also finds UD-Q4_K_M
                     have = sorted({quant_of(p) for p, _ in files if quant_of(p) and 'mmproj' not in p.lower()})
-                    raise ValueError('%s has no %s GGUF%s' % (a[0], want or 'Q4_K_M', ('; it has %s, so add :%s to the name' % (', '.join(have), have[0]) if len(have) == 1
+                    raise ValueError('%s has no %s GGUF%s' % (a[0], want,('; it has %s, so add :%s to the name' % (', '.join(have), have[0]) if len(have) == 1
                                      else '; give one of: ' + ', '.join(have)) if have else ''))
                 main.sort()
                 first = main[0][0]
@@ -7499,7 +7555,8 @@ install_archive() {  # a llama.cpp or Ollama release file the user downloaded ->
   n=${f##*/}
   pins_load
   a=$(arch_of llama 2>/dev/null || true)
-  for v in cpu vulkan cuda-12.8 cuda-13.4; do [[ $n == "$(llama_asset "$v" 2>/dev/null)" ]] && { comp=llama var=$v; }; done
+  if [[ -n $a && $n == "llama-$(pin llama)-bin-ubuntu-$a.tar.gz" ]]; then comp=llama var=cpu
+  elif [[ -n $a && $n =~ ^llama-$(pin llama)-bin-ubuntu-(vulkan|cuda-[0-9]+\.[0-9]+)-$a\.tar\.gz$ ]]; then comp=llama var=${BASH_REMATCH[1]}; fi
   a=$(arch_of ollama 2>/dev/null || true)
   [[ $n == "ollama-linux-$a.tar.zst" ]] && comp=ollama var=base
   [[ $n == "ollama-linux-$a-rocm.tar.zst" ]] && comp=ollama var=rocm

@@ -1,4 +1,4 @@
-# llmserver 2.8.3 — Operator manual
+# llmserver 2.8.4 — Operator manual
 
 This manual uses ASD-STE100 Simplified Technical English. Instructions are short and in the active voice, and there is one action in each step.
 
@@ -146,6 +146,12 @@ The changes of 2.8.3 were tested on Ubuntu 26.04 (bash 5.3, Python 3.14, bubblew
 
 These were not tested: WSL2 (`/dev/dxg`, `/mnt/c`) and AMD GPUs.
 
+The changes of 2.8.4 were tested on the same computer, with the real GitHub and Hugging Face:
+
+- llama.cpp now ships CUDA 13.5 and 12.8 builds, not 13.4. 2.8.3 refused `LLMSERVER_LLAMA_VERSION=b12728` ("no SHA-256 digest for ...cuda-13.4..."). 2.8.4 takes the CUDA build from the release's own file list: b12728 installed as its `cuda-13.5` build and ran. The built-in pin b11798 still uses its `cuda-13.4` build. `LLMSERVER_LLAMA_BUILD` takes `cuda-12` or `cuda-13`; the old values `cuda-12.8` and `cuda-13.4` still work and mean the newest build of that CUDA version.
+- GitHub's "latest" label for llama.cpp sits on `v1.0.0`, a release with only a text file, and its builds are marked as pre-releases. 2.8.3 refused `upgrade llama --latest`. 2.8.4 takes the newest `bNNNNN` release with checksums: `versions --latest` showed b12728, and `upgrade llama --latest` installed it.
+- A GGUF quant such as `Q4_K_M` also matches unsloth's `UD-Q4_K_M` in the memory check, as it already did in the download. 2.8.3 skipped the memory check for `unsloth/Inkling-2-Mini-GGUF`; 2.8.4 estimated 18.3 GB at 16384 tokens over the two GPUs (27.9 GB).
+
 The vLLM installation method was tested on a small package only. GPU operation was tested with simulated GPUs only. Before your first real start, use `llmserver check`, `llmserver capacity` and `--dry-run`.
 
 ---
@@ -199,7 +205,7 @@ Make sure that the computer agrees with these requirements:
    llmserver --version
    ```
 
-   Result: The command shows `llmserver 2.8.3`.
+   Result: The command shows `llmserver 2.8.4`.
 
 ### 2.3 Do the setup
 
@@ -2507,7 +2513,7 @@ Put the settings in `~/.llmserver/llmserver.env`.
 | `LLMSERVER_LOG_LEVEL` | `info` | `info` or `debug` |
 | `LLMSERVER_LOG_MAX_MB` | `5` | The maximum size of `install.log` |
 | `LLMSERVER_LLAMA_SOURCE`, `_VLLM_SOURCE`, `_OLLAMA_SOURCE` | `managed` | `managed`, `system` (from `PATH`), or the full path of your own program or its folder |
-| `LLMSERVER_LLAMA_BUILD` | `auto` | `auto`, `cpu`, `vulkan`, `cuda-12.8` or `cuda-13.4` |
+| `LLMSERVER_LLAMA_BUILD` | `auto` | `auto`, `cpu`, `vulkan`, `cuda-12` or `cuda-13` (the release's newest build of that CUDA version) |
 | `LLMSERVER_AUTO_INSTALL` | `on` | `on` installs the runtime when necessary |
 | `LLMSERVER_HOME` | `~/.llmserver` | The llmserver home. Only in the environment or in `/etc/llmserver_env` |
 | `LLMSERVER_MODEL_STORE` | `shared` | `shared`: the model files go into the shared caches. `private`: into `models/` in the llmserver home. `HF_HOME`, `HF_HUB_CACHE` and `OLLAMA_MODELS` have priority. To let other tools use the private store, see `models share` |

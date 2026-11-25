@@ -2,7 +2,7 @@
 
 **Run local LLMs on Linux with one command. Every download is checked, every engine is sandboxed, and each model gets its own OpenAI-compatible endpoint.**
 
-![version](https://img.shields.io/badge/version-2.8.3-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+![version](https://img.shields.io/badge/version-2.8.4-blue) ![platform](https://img.shields.io/badge/platform-Linux%20x86--64%20%7C%20ARM64-lightgrey) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 llmserver is a single bash script. It installs and runs **llama.cpp**, **vLLM** and **Ollama** for you. Before a model starts, llmserver:
 
@@ -74,12 +74,12 @@ You do not need Python. llmserver installs its own.
 Download `llmserver` and `SHA256SUMS` for a release tag, check, and install:
 
 ```bash
-V=2.8.3                                                   # the release you want (see the Releases page)
+V=2.8.4                                                   # the release you want (see the Releases page)
 curl -fsSLO "https://raw.githubusercontent.com/pavansreddy/llmserver/$V/llmserver"
 curl -fsSLO "https://raw.githubusercontent.com/pavansreddy/llmserver/$V/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS                  # must show: llmserver: OK
 chmod +x llmserver && mkdir -p ~/.local/bin && mv llmserver ~/.local/bin/
-llmserver --version                                       # llmserver 2.8.3
+llmserver --version                                       # llmserver 2.8.4
 ```
 
 These URLs read the files committed at the release tag, so they work whether or not the release has files attached. When a release does list `llmserver` and `SHA256SUMS` under *Assets*, downloading those is the same thing.
@@ -700,7 +700,7 @@ Values are read in this order; later ones win: `/etc/llmserver_env` → `~/.llms
 | `webui_terminal` · `webui_terminal_port` | `on` · `8889` | Open Terminal in Open WebUI: `on` (sandbox), `host` or `off` |
 | `llama_version` · `ollama_version` · `vllm_version` · `webui_version` · `webui_terminal_version` | empty (pinned) | The version to install ([Choose versions](#choose-versions)) |
 | `llama_source` · `vllm_source` · `ollama_source` | `managed` | Use your own engine |
-| `llama_build` | `auto` | `cpu`, `vulkan`, `cuda-12.8`, `cuda-13.4` |
+| `llama_build` | `auto` | `cpu`, `vulkan`, `cuda-12`, `cuda-13` |
 | `ready_timeout` · `stop_timeout` | `900` · `20` | Seconds |
 | `auto_install` | `on` | Install the runtime when needed |
 
